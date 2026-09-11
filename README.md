@@ -109,9 +109,15 @@ python3 plex_intro_randomizer.py -c config.json --dry-run rotate
 ```
 
 ### One-Way Sync from Google Photos
-Download all new videos from the album (transcoding any non-MP4s):
+Download all new videos from the album (automatically transcoding and pillarboxing non-16:9/portrait clips):
 ```bash
 python3 plex_intro_randomizer.py -c config.json sync
+```
+
+### Fix / Normalize Existing Videos (Aspect Ratio Fix)
+If you have existing clips (such as portrait smartphone videos) that stretch on TV screens, this scans your video directory and normalizes them into 1920x1080 16:9 pillarboxed MP4s with black bars:
+```bash
+python3 plex_intro_randomizer.py -c config.json normalize
 ```
 
 ### Rotate Intro Video Once

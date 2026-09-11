@@ -157,17 +157,70 @@ class GPhotosAlbumDownloader:
             logger.debug("Failed to probe %s: %s", download_url, e)
             return None
 
+    def get_video_dimensions(self, file_path: Path) -> Tuple[Optional[int], Optional[int]]:
+        """Extract effective width and height accounting for rotation metadata."""
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,side_data_list:stream_tags=rotate",
+            "-of", "json",
+            str(file_path),
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            data = json.loads(res.stdout)
+            stream = data["streams"][0]
+            w = int(stream["width"])
+            h = int(stream["height"])
+            rotate = 0
+            if "tags" in stream and "rotate" in stream["tags"]:
+                try:
+                    rotate = int(stream["tags"]["rotate"])
+                except ValueError:
+                    pass
+            if "side_data_list" in stream:
+                for sd in stream["side_data_list"]:
+                    if "rotation" in sd:
+                        try:
+                            rotate = int(sd["rotation"])
+                        except ValueError:
+                            pass
+            if rotate in (90, 270, -90, -270):
+                w, h = h, w
+            return w, h
+        except Exception as e:
+            logger.debug("Could not probe dimensions for %s: %s", file_path.name, e)
+            return None, None
+
+    def is_standard_16_9(self, width: Optional[int], height: Optional[int]) -> bool:
+        """Check if video is roughly 16:9 landscape (e.g. 1.777 aspect ratio)."""
+        if not width or not height or height <= 0:
+            return False
+        # If height > width, it is portrait -> definitely not 16:9 landscape
+        if height > width:
+            return False
+        aspect = width / height
+        # Accept ratios between 1.75 and 1.80 as 16:9
+        return 1.75 <= aspect <= 1.80 and width >= 1280
+
     def transcode_video_to_mp4(self, input_path: Path, output_path: Path) -> bool:
         """
-        Transcode input video to standard H.264/AAC MP4 playable by all Plex clients.
-        Uses ffmpeg with -pix_fmt yuv420p and faststart for streaming/quick playback.
+        Transcode input video to standard 1920x1080 16:9 H.264/AAC MP4.
+        Pillarboxes/letterboxes portrait and 4:3 videos with black bars so
+        Plex clients display them with preserved aspect ratio without stretching.
         """
-        logger.info("Transcoding %s to MP4 (%s)...", input_path.name, output_path.name)
+        logger.info("Normalizing & transcoding %s to 16:9 MP4 (%s)...", input_path.name, output_path.name)
         temp_output = output_path.with_suffix(".transcoding.mp4")
+        filter_str = (
+            "scale=1920:1080:force_original_aspect_ratio=decrease,"
+            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,"
+            "setsar=1"
+        )
         cmd = [
             self.ffmpeg_path,
             "-y",
             "-i", str(input_path),
+            "-vf", filter_str,
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "22",
@@ -186,13 +239,47 @@ class GPhotosAlbumDownloader:
                 return False
 
             temp_output.replace(output_path)
-            logger.info("Successfully transcoded %s -> %s", input_path.name, output_path.name)
+            logger.info("Successfully normalized %s -> %s (1920x1080 16:9)", input_path.name, output_path.name)
             return True
         except Exception as e:
             logger.error("Error executing ffmpeg: %s", e)
             if temp_output.exists():
                 temp_output.unlink()
             return False
+
+    def normalize_existing_videos(self) -> int:
+        """
+        Inspect all existing video files in the output directory and convert any
+        portrait or non-16:9 videos into 1920x1080 16:9 pillarboxed MP4s.
+        """
+        logger.info("Checking existing video files in %s for portrait/aspect ratio issues...", self.output_dir)
+        fixed_count = 0
+        for p in list(self.output_dir.iterdir()):
+            if not p.is_file() or p.name.startswith(".") or p.name.endswith(".transcoding.mp4"):
+                continue
+            if p.suffix.lower() not in (".mp4", ".mov", ".wmv", ".mkv", ".avi", ".webm", ".m4v"):
+                continue
+
+            w, h = self.get_video_dimensions(p)
+            # If it's not 16:9 landscape or height >= width, it needs normalization
+            if w and h and not self.is_standard_16_9(w, h):
+                logger.warning(
+                    "Detected non-16:9 / portrait video: %s (%dx%d). Normalizing to 1920x1080...",
+                    p.name, w, h
+                )
+                backup_temp = p.with_suffix(".orig_fix" + p.suffix)
+                p.rename(backup_temp)
+                target_mp4 = p.with_suffix(".mp4")
+                success = self.transcode_video_to_mp4(backup_temp, target_mp4)
+                if success:
+                    backup_temp.unlink(missing_ok=True)
+                    fixed_count += 1
+                else:
+                    logger.error("Failed to normalize %s. Restoring original.", p.name)
+                    backup_temp.rename(p)
+        if fixed_count > 0:
+            logger.info("Successfully normalized %d existing videos to 16:9 aspect ratio.", fixed_count)
+        return fixed_count
 
     def sync_album(self, dry_run: bool = False) -> List[Path]:
         """
@@ -267,8 +354,12 @@ class GPhotosAlbumDownloader:
                             break
                         out_f.write(chunk)
 
-                # Transcode if needed (or if source was not mp4)
-                if self.transcode_to_mp4 and not is_already_mp4:
+                # Check if transcoding/normalization is needed
+                w, h = self.get_video_dimensions(temp_download_path)
+                needs_transcode = not is_already_mp4 or not self.is_standard_16_9(w, h)
+
+                if self.transcode_to_mp4 and needs_transcode:
+                    logger.info("Transcoding/normalizing %s (%s, %sx%s) to 16:9 MP4...", orig_filename, content_type, w, h)
                     success = self.transcode_video_to_mp4(temp_download_path, dest_path)
                     temp_download_path.unlink(missing_ok=True)
                     if not success:
@@ -293,6 +384,10 @@ class GPhotosAlbumDownloader:
                 logger.error("Failed downloading %s: %s", orig_filename, e)
                 if temp_download_path.exists():
                     temp_download_path.unlink(missing_ok=True)
+
+        # Also inspect and normalize any existing videos already in directory
+        if self.transcode_to_mp4 and not dry_run:
+            self.normalize_existing_videos()
 
         logger.info("Sync complete. %d new/updated videos downloaded.", len(new_files))
         return new_files

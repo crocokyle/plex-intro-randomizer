@@ -70,6 +70,43 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
         self.assertTrue(dest_mp4.exists())
         self.assertGreater(dest_mp4.stat().st_size, 0)
 
+        # Verify output is 1920x1080 16:9
+        w, h = downloader.get_video_dimensions(dest_mp4)
+        self.assertEqual(w, 1920)
+        self.assertEqual(h, 1080)
+
+    def test_portrait_normalization(self):
+        """Verify that a 720x1280 portrait video is normalized to 1920x1080 16:9."""
+        portrait_src = Path(self.test_dir) / "vertical_clip.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=green:s=720x1280:d=1",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+            "-t", "1",
+            str(portrait_src),
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(res.returncode, 0)
+
+        downloader = GPhotosAlbumDownloader(
+            album_url=self.album_url,
+            output_dir=self.test_dir,
+            transcode_to_mp4=True,
+        )
+        # Verify it detects as not standard 16:9
+        w, h = downloader.get_video_dimensions(portrait_src)
+        self.assertEqual((w, h), (720, 1280))
+        self.assertFalse(downloader.is_standard_16_9(w, h))
+
+        # Run normalize_existing_videos
+        fixed = downloader.normalize_existing_videos()
+        self.assertEqual(fixed, 1)
+
+        # Verify normalized dimensions
+        w2, h2 = downloader.get_video_dimensions(portrait_src)
+        self.assertEqual((w2, h2), (1920, 1080))
+        self.assertTrue(downloader.is_standard_16_9(w2, h2))
+
 
 class TestIntroRotator(unittest.TestCase):
     def setUp(self):

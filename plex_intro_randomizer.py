@@ -87,6 +87,23 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     logger.info("Sync finished. %d new items downloaded.", len(new_files))
 
 
+def run_normalize(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+    """Scan and normalize all existing video files in the directory to 16:9 MP4."""
+    video_dir = args.dir or config.get("video_directory")
+    if not video_dir:
+        logger.error("Video directory is required. Specify with --dir / -d or in config.")
+        sys.exit(1)
+
+    logger.info("Scanning %s to fix aspect ratios and normalize to 1920x1080 16:9...", video_dir)
+    downloader = GPhotosAlbumDownloader(
+        album_url="https://photos.app.goo.gl/dummy",
+        output_dir=video_dir,
+        transcode_to_mp4=True,
+    )
+    fixed = downloader.normalize_existing_videos()
+    logger.info("Aspect ratio normalization complete. %d files fixed.", fixed)
+
+
 def run_rotate(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     """Execute intro video rotation."""
     video_dir = args.dir or config.get("video_directory")
@@ -285,6 +302,9 @@ def parse_args() -> argparse.Namespace:
     # sync command
     subparsers.add_parser("sync", help="Run one-way download sync from Google Photos album")
 
+    # normalize command
+    subparsers.add_parser("normalize", help="Scan existing intro directory and fix portrait/aspect ratio issues by pillarboxing to 16:9")
+
     # rotate command
     subparsers.add_parser("rotate", help="Rotate intro video once (renames previous intro safely and sets new random intro)")
 
@@ -328,6 +348,8 @@ def main() -> None:
 
     if args.command == "sync":
         run_sync(args, config)
+    elif args.command == "normalize":
+        run_normalize(args, config)
     elif args.command == "rotate":
         run_rotate(args, config)
     elif args.command == "status":
