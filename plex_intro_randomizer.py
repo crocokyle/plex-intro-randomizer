@@ -75,12 +75,25 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
     visual_filter = args.visual_filter if args.visual_filter is not None else config.get("visual_filter", config.get("nostalgic_filter", True))
 
+    force = getattr(args, "force", False) or args.command in ["redownload", "force-download"]
+    clean = getattr(args, "clean", False)
+    target_intro = config.get("target_intro_name", DEFAULT_TARGET_INTRO)
+
     logger.info("Starting Google Photos album sync...")
     logger.info("Album URL: %s", album_url)
     logger.info("Target Directory: %s", video_dir)
     logger.info("Transcode non-MP4: %s", transcode)
     logger.info("Normalize Audio (EBU R128): %s", normalize_audio)
     logger.info("Visual Filter: %s", visual_filter)
+    logger.info("Force Re-download / Replace All: %s", force)
+    if clean:
+        logger.info("Clean Directory Before Download: True")
+
+    rotator = IntroRotator(video_dir=video_dir, target_intro_name=target_intro)
+    if force or clean:
+        restored = rotator.restore_current_intro(dry_run=args.dry_run)
+        if restored:
+            logger.info("Restored active intro '%s' -> '%s' before downloading.", target_intro, restored)
 
     downloader = GPhotosAlbumDownloader(
         album_url=album_url,
@@ -89,8 +102,14 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         normalize_audio=normalize_audio,
         visual_filter=visual_filter,
     )
-    new_files = downloader.sync_album(dry_run=args.dry_run)
-    logger.info("Sync finished. %d new items downloaded.", len(new_files))
+    new_files = downloader.sync_album(dry_run=args.dry_run, force=force, clean=clean)
+    logger.info("Sync finished. %d items downloaded / updated.", len(new_files))
+
+    if (force or clean) and not args.dry_run:
+        intro_file = Path(video_dir) / target_intro
+        if not intro_file.exists():
+            logger.info("Selecting a fresh '%s' from downloaded videos...", target_intro)
+            rotator.rotate()
 
 
 def run_normalize(args: argparse.Namespace, config: Dict[str, Any]) -> None:
@@ -351,7 +370,38 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
 
     # sync command
-    subparsers.add_parser("sync", help="Run one-way download sync from Google Photos album")
+    sync_parser = subparsers.add_parser("sync", help="Run one-way download sync from Google Photos album")
+    sync_parser.add_argument(
+        "-f", "--force",
+        action="store_true",
+        help="Force re-download all videos and replace existing files (bypasses cache/manifest)",
+    )
+    sync_parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Wipe existing videos in the directory first before downloading fresh from album",
+    )
+
+    # redownload / force-download command
+    redownload_parser = subparsers.add_parser(
+        "redownload",
+        help="Force download all videos from Google Photos and replace everything",
+    )
+    redownload_parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Wipe existing videos in the directory first before downloading fresh from album",
+    )
+
+    force_dl_parser = subparsers.add_parser(
+        "force-download",
+        help="Alias for 'redownload': force download all videos and replace everything",
+    )
+    force_dl_parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Wipe existing videos in the directory first before downloading fresh from album",
+    )
 
     # normalize command
     norm_parser = subparsers.add_parser("normalize", help="Scan existing intro directory and fix portrait/aspect ratio issues by pillarboxing to 16:9")
@@ -402,7 +452,7 @@ def main() -> None:
 
     config = load_config(args.config)
 
-    if args.command == "sync":
+    if args.command in ["sync", "redownload", "force-download"]:
         run_sync(args, config)
     elif args.command == "normalize":
         run_normalize(args, config)

@@ -118,6 +118,18 @@ Download all new videos from the album (automatically transcoding and pillarboxi
 python3 plex_intro_randomizer.py -c config.json sync
 ```
 
+### Force Download All Videos & Replace Everything
+Force re-download all videos from the Google Photos album, re-applying visual filters and audio normalization, and overwriting/replacing all local files:
+```bash
+python3 plex_intro_randomizer.py -c config.json redownload
+```
+*(Or use `python3 plex_intro_randomizer.py -c config.json sync --force`)*
+
+If you also want to remove previous videos in the directory first (e.g. to clear clips deleted from the album):
+```bash
+python3 plex_intro_randomizer.py -c config.json redownload --clean
+```
+
 ### Fix / Normalize Existing Videos (Aspect Ratio Fix)
 If you have existing clips (such as portrait smartphone videos) that stretch on TV screens, this scans your video directory and normalizes them into 1920x1080 16:9 pillarboxed MP4s with black bars:
 ```bash

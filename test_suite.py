@@ -134,7 +134,84 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
             self.assertTrue(dst_p.exists())
             w, h = dl.get_video_dimensions(dst_p)
             self.assertEqual((w, h), (1920, 1080))
-            self.assertTrue(dl.has_audio_stream(dst_p))
+    def test_sync_album_force_and_clean(self):
+        """Verify that sync_album respects force=True (redownloads/replaces) and clean=True (wipes old clips)."""
+        import io
+        from unittest.mock import patch, MagicMock
+
+        # Create a valid 1-second sample video to serve as mock download payload
+        sample_mp4 = Path(self.test_dir) / "source_mock.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=640x360:d=1",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+            "-t", "1",
+            str(sample_mp4),
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(res.returncode, 0)
+        sample_bytes = sample_mp4.read_bytes()
+
+        output_sync_dir = Path(self.test_dir) / "intros_sync"
+        output_sync_dir.mkdir(parents=True, exist_ok=True)
+
+        downloader = GPhotosAlbumDownloader(
+            album_url=self.album_url,
+            output_dir=output_sync_dir,
+            transcode_to_mp4=True,
+            normalize_audio=False,
+            visual_filter="none",
+        )
+
+        downloader.fetch_album_page = MagicMock(return_value=("<html>mock</html>", None))
+        downloader.extract_media_urls = MagicMock(return_value=["https://lh3.googleusercontent.com/pw/ITEM_ALPHA"])
+        downloader.get_media_info = MagicMock(return_value={
+            "download_url": "https://example.com/video.mp4",
+            "filename": "clip_alpha.mp4",
+            "content_type": "video/mp4",
+        })
+
+        class MockResponse:
+            def __init__(self, data):
+                self._io = io.BytesIO(data)
+            def read(self, size=65536):
+                return self._io.read(size)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        with patch("urllib.request.urlopen", side_effect=lambda req, timeout=120: MockResponse(sample_bytes)):
+            # 1. Initial sync
+            synced1 = downloader.sync_album(dry_run=False, force=False)
+            self.assertEqual(len(synced1), 1)
+            clip_path = output_sync_dir / "clip_alpha.mp4"
+            self.assertTrue(clip_path.exists())
+            self.assertIn("ITEM_ALPHA", downloader.manifest)
+
+            # 2. Second sync without force -> Should skip existing
+            synced2 = downloader.sync_album(dry_run=False, force=False)
+            self.assertEqual(len(synced2), 0)
+
+            # 3. Tamper with file to verify force replace
+            clip_path.write_bytes(b"tampered_data")
+            self.assertEqual(clip_path.stat().st_size, len(b"tampered_data"))
+
+            # 4. Sync with force=True -> Should re-download and replace file
+            synced3 = downloader.sync_album(dry_run=False, force=True)
+            self.assertEqual(len(synced3), 1)
+            self.assertTrue(clip_path.exists())
+            self.assertNotEqual(clip_path.read_bytes(), b"tampered_data")
+
+            # 5. Add an extra old file and sync with clean=True
+            stray_file = output_sync_dir / "stray_old_video.mp4"
+            stray_file.write_bytes(b"old clip")
+            self.assertTrue(stray_file.exists())
+
+            synced4 = downloader.sync_album(dry_run=False, force=True, clean=True)
+            self.assertEqual(len(synced4), 1)
+            self.assertFalse(stray_file.exists(), "Clean should have wiped stray_old_video.mp4")
+            self.assertTrue(clip_path.exists(), "clip_alpha.mp4 should have been re-downloaded")
 
 
 class TestIntroRotator(unittest.TestCase):

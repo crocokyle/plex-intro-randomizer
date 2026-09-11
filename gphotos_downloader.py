@@ -341,10 +341,12 @@ class GPhotosAlbumDownloader:
             logger.info("Successfully normalized %d existing videos.", fixed_count)
         return fixed_count
 
-    def sync_album(self, dry_run: bool = False) -> List[Path]:
+    def sync_album(self, dry_run: bool = False, force: bool = False, clean: bool = False) -> List[Path]:
         """
-        Run one-way sync. Downloads new video clips from Google Photos, transcodes if necessary,
+        Run one-way sync. Downloads video clips from Google Photos, transcodes if necessary,
         and records downloaded items in the manifest.
+        If force=True, re-downloads all clips and replaces existing files in the directory.
+        If clean=True, removes existing video files in output_dir prior to downloading.
         Returns list of newly downloaded/transcoded video paths.
         """
         html, _ = self.fetch_album_page()
@@ -353,11 +355,29 @@ class GPhotosAlbumDownloader:
             logger.warning("No media items found in Google Photos album.")
             return []
 
+        if clean and not dry_run:
+            logger.info("Clean option enabled. Removing existing video files in %s...", self.output_dir)
+            for item in self.output_dir.iterdir():
+                if item.is_file() and not item.name.startswith(".") and item.suffix.lower() in (
+                    ".mp4", ".mov", ".wmv", ".mkv", ".avi", ".m4v", ".webm"
+                ):
+                    try:
+                        item.unlink()
+                        logger.debug("Removed existing file: %s", item.name)
+                    except Exception as e:
+                        logger.warning("Could not remove %s: %s", item.name, e)
+            self.manifest = {}
+            if self.manifest_path.exists():
+                try:
+                    self.manifest_path.unlink()
+                except Exception:
+                    pass
+
         new_files: List[Path] = []
 
         for idx, base_url in enumerate(base_urls, start=1):
             media_id = base_url.split("/pw/")[-1]
-            if media_id in self.manifest:
+            if not force and media_id in self.manifest:
                 existing_record = self.manifest[media_id]
                 target_filename = existing_record.get("final_filename")
                 if target_filename and (self.output_dir / target_filename).exists():
@@ -389,13 +409,14 @@ class GPhotosAlbumDownloader:
             else:
                 final_filename = orig_filename
 
-            # Ensure unique name in output directory if a different file already has that name
+            # Ensure destination path
             dest_path = self.output_dir / final_filename
-            if dest_path.exists() and media_id not in self.manifest:
+            if not force and dest_path.exists() and media_id not in self.manifest:
                 final_filename = f"{stem}_{media_id[:6]}.mp4"
                 dest_path = self.output_dir / final_filename
 
-            logger.info("[%d/%d] New video detected: %s (Original: %s)", idx, len(base_urls), final_filename, orig_filename)
+            action_desc = "Replacing" if (force and dest_path.exists()) else "Downloading"
+            logger.info("[%d/%d] %s video: %s (Original: %s)", idx, len(base_urls), action_desc, final_filename, orig_filename)
 
             if dry_run:
                 logger.info("[DRY RUN] Would download and sync: %s", final_filename)
@@ -416,7 +437,7 @@ class GPhotosAlbumDownloader:
 
                 # Check if transcoding/normalization is needed
                 w, h = self.get_video_dimensions(temp_download_path)
-                needs_transcode = not is_already_mp4 or not self.is_standard_16_9(w, h)
+                needs_transcode = force or not is_already_mp4 or not self.is_standard_16_9(w, h) or self.visual_filter is not None or self.normalize_audio
 
                 if self.transcode_to_mp4 and needs_transcode:
                     logger.info("Transcoding/normalizing %s (%s, %sx%s) to 16:9 MP4...", orig_filename, content_type, w, h)
