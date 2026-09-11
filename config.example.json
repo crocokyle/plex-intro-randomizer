@@ -1,0 +1,8 @@
+{
+  "video_directory": "/home/croc/videos/plex_intros",
+  "album_url": "https://photos.app.goo.gl/YOUR_ALBUM_KEY",
+  "target_intro_name": "intro.mp4",
+  "sync_interval_hours": 24,
+  "rotate_interval_minutes": 60,
+  "transcode_to_mp4": true
+}

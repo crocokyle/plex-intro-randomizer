@@ -1,0 +1,22 @@
+[Unit]
+Description=Plex Intro Randomizer & Google Photos Sync Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Path to your repository or working directory
+WorkingDirectory=/home/croc/code/plex-intro-randomizer
+
+# Execution command pointing to Python and config
+ExecStart=/usr/bin/python3 /home/croc/code/plex-intro-randomizer/plex_intro_randomizer.py -c /home/croc/code/plex-intro-randomizer/config.json daemon
+
+# Restart on crash or network disconnection after 10 seconds
+Restart=on-failure
+RestartSec=10s
+
+# Environment settings
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target

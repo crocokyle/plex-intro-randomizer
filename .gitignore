@@ -1,0 +1,19 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local user configuration
+config.json
+
+# Local runtime state and manifests (if run in project folder)
+.intro_state.json
+.download_manifest.json
+*.tmp
+*.log
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
