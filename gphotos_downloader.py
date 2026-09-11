@@ -12,7 +12,7 @@ import urllib.parse
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any, Union
 
 logger = logging.getLogger("plex_intro_randomizer.downloader")
 
