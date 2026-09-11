@@ -72,16 +72,22 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         sys.exit(1)
 
     transcode = config.get("transcode_to_mp4", True) if args.transcode is None else args.transcode
+    normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
+    visual_filter = args.visual_filter if args.visual_filter is not None else config.get("visual_filter", config.get("nostalgic_filter", True))
 
     logger.info("Starting Google Photos album sync...")
     logger.info("Album URL: %s", album_url)
     logger.info("Target Directory: %s", video_dir)
     logger.info("Transcode non-MP4: %s", transcode)
+    logger.info("Normalize Audio (EBU R128): %s", normalize_audio)
+    logger.info("Visual Filter: %s", visual_filter)
 
     downloader = GPhotosAlbumDownloader(
         album_url=album_url,
         output_dir=video_dir,
         transcode_to_mp4=transcode,
+        normalize_audio=normalize_audio,
+        visual_filter=visual_filter,
     )
     new_files = downloader.sync_album(dry_run=args.dry_run)
     logger.info("Sync finished. %d new items downloaded.", len(new_files))
@@ -94,14 +100,21 @@ def run_normalize(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         logger.error("Video directory is required. Specify with --dir / -d or in config.")
         sys.exit(1)
 
-    logger.info("Scanning %s to fix aspect ratios and normalize to 1920x1080 16:9...", video_dir)
+    normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
+    visual_filter = args.visual_filter if args.visual_filter is not None else config.get("visual_filter", config.get("nostalgic_filter", True))
+
+    logger.info("Scanning %s to fix aspect ratios, audio levels, and visual filters...", video_dir)
+    logger.info("Visual Filter: %s | Normalize Audio: %s | Force All: %s", visual_filter, normalize_audio, args.force)
+
     downloader = GPhotosAlbumDownloader(
         album_url="https://photos.app.goo.gl/dummy",
         output_dir=video_dir,
         transcode_to_mp4=True,
+        normalize_audio=normalize_audio,
+        visual_filter=visual_filter,
     )
-    fixed = downloader.normalize_existing_videos()
-    logger.info("Aspect ratio normalization complete. %d files fixed.", fixed)
+    fixed = downloader.normalize_existing_videos(force=args.force)
+    logger.info("Normalization complete. %d files processed.", fixed)
 
 
 def run_rotate(args: argparse.Namespace, config: Dict[str, Any]) -> None:
@@ -144,6 +157,8 @@ class DaemonRunner:
         sync_interval_secs: float = DEFAULT_SYNC_INTERVAL_HOURS * 3600,
         rotate_interval_secs: float = DEFAULT_ROTATE_INTERVAL_MINUTES * 60,
         transcode_to_mp4: bool = True,
+        normalize_audio: bool = True,
+        visual_filter: Any = True,
         dry_run: bool = False,
     ):
         self.video_dir = Path(video_dir)
@@ -152,6 +167,8 @@ class DaemonRunner:
         self.sync_interval_secs = sync_interval_secs
         self.rotate_interval_secs = rotate_interval_secs
         self.transcode_to_mp4 = transcode_to_mp4
+        self.normalize_audio = normalize_audio
+        self.visual_filter = visual_filter
         self.dry_run = dry_run
         self.running = True
 
@@ -159,6 +176,8 @@ class DaemonRunner:
             album_url=self.album_url,
             output_dir=self.video_dir,
             transcode_to_mp4=self.transcode_to_mp4,
+            normalize_audio=self.normalize_audio,
+            visual_filter=self.visual_filter,
         )
         self.rotator = IntroRotator(
             video_dir=self.video_dir,
@@ -178,6 +197,7 @@ class DaemonRunner:
         logger.info("Directory: %s", self.video_dir)
         logger.info("Sync interval: %.1f hours (%.0f s)", self.sync_interval_secs / 3600, self.sync_interval_secs)
         logger.info("Rotate interval: %.1f minutes (%.0f s)", self.rotate_interval_secs / 60, self.rotate_interval_secs)
+        logger.info("Visual Filter: %s | Normalize Audio: %s", self.visual_filter, self.normalize_audio)
 
         last_sync_time = 0.0
         last_rotate_time = 0.0
@@ -243,6 +263,8 @@ def run_daemon(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     sync_hours = args.sync_interval if args.sync_interval is not None else config.get("sync_interval_hours", DEFAULT_SYNC_INTERVAL_HOURS)
     rotate_mins = args.rotate_interval if args.rotate_interval is not None else config.get("rotate_interval_minutes", DEFAULT_ROTATE_INTERVAL_MINUTES)
     transcode = config.get("transcode_to_mp4", True) if args.transcode is None else args.transcode
+    normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
+    visual_filter = args.visual_filter if args.visual_filter is not None else config.get("visual_filter", config.get("nostalgic_filter", True))
 
     runner = DaemonRunner(
         video_dir=video_dir,
@@ -251,6 +273,8 @@ def run_daemon(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         sync_interval_secs=sync_hours * 3600,
         rotate_interval_secs=rotate_mins * 60,
         transcode_to_mp4=transcode,
+        normalize_audio=normalize_audio,
+        visual_filter=visual_filter,
         dry_run=args.dry_run,
     )
     runner.run(
@@ -287,6 +311,33 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
     parser.add_argument(
+        "--visual-filter",
+        choices=["sepia", "bw", "vintage", "none"],
+        help="Visual filter preset: 'sepia', 'bw' (black & white), 'vintage', or 'none'",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-visual-filter",
+        dest="visual_filter",
+        action="store_const",
+        const="none",
+        help="Disable visual filters (keep original colors)",
+    )
+    parser.add_argument(
+        "--normalize-audio",
+        dest="normalize_audio",
+        action="store_true",
+        help="Enable EBU R128 audio loudness normalization (prevents clipping & quiet audio)",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-normalize-audio",
+        dest="normalize_audio",
+        action="store_false",
+        help="Disable audio loudness normalization",
+        default=None,
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Simulate operations without making changes to filesystem or downloading",
@@ -303,7 +354,12 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("sync", help="Run one-way download sync from Google Photos album")
 
     # normalize command
-    subparsers.add_parser("normalize", help="Scan existing intro directory and fix portrait/aspect ratio issues by pillarboxing to 16:9")
+    norm_parser = subparsers.add_parser("normalize", help="Scan existing intro directory and fix portrait/aspect ratio issues by pillarboxing to 16:9")
+    norm_parser.add_argument(
+        "-f", "--force",
+        action="store_true",
+        help="Force re-processing of all video files to apply visual filter and audio normalization",
+    )
 
     # rotate command
     subparsers.add_parser("rotate", help="Rotate intro video once (renames previous intro safely and sets new random intro)")

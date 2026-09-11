@@ -73,7 +73,9 @@ Edit `config.json` with your desired directories and intervals:
   "target_intro_name": "intro.mp4",
   "sync_interval_hours": 24,
   "rotate_interval_minutes": 60,
-  "transcode_to_mp4": true
+  "transcode_to_mp4": true,
+  "visual_filter": true,
+  "normalize_audio": true
 }
 ```
 
@@ -82,7 +84,9 @@ Edit `config.json` with your desired directories and intervals:
 * `target_intro_name`: The active intro filename that Plex points to (`intro.mp4`).
 * `sync_interval_hours`: How often to check for newly added videos in Google Photos (default: `24`).
 * `rotate_interval_minutes`: How often to rotate `intro.mp4` (default: `60`).
-* `transcode_to_mp4`: Automatically convert incoming `.MOV`, `.wmv`, and other non-mp4 videos to `.mp4` via `ffmpeg` (default: `true`).
+* `transcode_to_mp4`: Automatically convert incoming non-MP4 videos to `.mp4` via `ffmpeg` (default: `true`).
+* `visual_filter`: Applies a nostalgic visual style to the clips (`true` or `"sepia"` for vintage sepia, `"bw"` for black & white, `"vintage"` for film curves, or `false` to turn off and keep original colors).
+* `normalize_audio`: Normalizes audio loudness to EBU R128 (`-16 LUFS`) so no clips clip or play too quietly (default: `true`).
 
 ### 3. Configure Plex Media Server
 1. Open **Plex Web App**.

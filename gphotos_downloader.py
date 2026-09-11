@@ -31,17 +31,38 @@ def sanitize_filename(name: str) -> str:
     return cleaned if cleaned else "video"
 
 
+def resolve_visual_filter(filter_val: Any) -> Optional[str]:
+    """Resolve boolean or string into a filter key ('sepia', 'bw', 'vintage', or None)."""
+    if isinstance(filter_val, bool):
+        return "sepia" if filter_val else None
+    if isinstance(filter_val, str):
+        v = filter_val.strip().lower()
+        if v in ("false", "none", "off", "no", "0", ""):
+            return None
+        if v in ("true", "yes", "on", "1", "sepia"):
+            return "sepia"
+        if v in ("bw", "b&w", "black_and_white", "grayscale", "gray"):
+            return "bw"
+        if v in ("vintage", "nostalgic"):
+            return "vintage"
+    return None
+
+
 class GPhotosAlbumDownloader:
     def __init__(
         self,
         album_url: str,
         output_dir: str | Path,
         transcode_to_mp4: bool = True,
+        normalize_audio: bool = True,
+        visual_filter: Any = True,
         ffmpeg_path: str = "ffmpeg",
     ):
         self.album_url = album_url
         self.output_dir = Path(output_dir)
         self.transcode_to_mp4 = transcode_to_mp4
+        self.normalize_audio = normalize_audio
+        self.visual_filter = resolve_visual_filter(visual_filter)
         self.ffmpeg_path = ffmpeg_path
         self.manifest_path = self.output_dir / MANIFEST_FILENAME
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -203,33 +224,73 @@ class GPhotosAlbumDownloader:
         # Accept ratios between 1.75 and 1.80 as 16:9
         return 1.75 <= aspect <= 1.80 and width >= 1280
 
+    def has_audio_stream(self, file_path: Path) -> bool:
+        """Check if video file contains an audio stream."""
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-select_streams", "a:0",
+            "-show_entries", "stream=codec_type",
+            "-of", "csv=p=0",
+            str(file_path),
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+            return "audio" in res.stdout.lower()
+        except Exception:
+            return False
+
     def transcode_video_to_mp4(self, input_path: Path, output_path: Path) -> bool:
         """
         Transcode input video to standard 1920x1080 16:9 H.264/AAC MP4.
-        Pillarboxes/letterboxes portrait and 4:3 videos with black bars so
-        Plex clients display them with preserved aspect ratio without stretching.
+        - Pillarboxes/letterboxes portrait and 4:3 videos with black bars.
+        - Applies a visual filter (sepia, bw / black & white, or vintage) if visual_filter is enabled.
+        - Normalizes audio loudness using EBU R128 (loudnorm) to prevent clipping and quiet audio.
         """
-        logger.info("Normalizing & transcoding %s to 16:9 MP4 (%s)...", input_path.name, output_path.name)
-        temp_output = output_path.with_suffix(".transcoding.mp4")
-        filter_str = (
-            "scale=1920:1080:force_original_aspect_ratio=decrease,"
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black,"
-            "setsar=1"
+        logger.info(
+            "Transcoding & normalizing %s (16:9, visual_filter=%s, loudnorm=%s) -> %s",
+            input_path.name, self.visual_filter, self.normalize_audio, output_path.name
         )
-        cmd = [
-            self.ffmpeg_path,
-            "-y",
-            "-i", str(input_path),
+        temp_output = output_path.with_suffix(".transcoding.mp4")
+
+        # Build video filter chain
+        vf_parts = []
+        if self.visual_filter == "sepia":
+            vf_parts.append("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131")
+        elif self.visual_filter == "bw":
+            vf_parts.append("hue=s=0")
+        elif self.visual_filter == "vintage":
+            vf_parts.append("curves=vintage")
+
+        vf_parts.append("scale=1920:1080:force_original_aspect_ratio=decrease")
+        vf_parts.append("pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black")
+        vf_parts.append("setsar=1")
+        filter_str = ",".join(vf_parts)
+
+        has_audio = self.has_audio_stream(input_path)
+
+        cmd = [self.ffmpeg_path, "-y", "-i", str(input_path)]
+        if not has_audio:
+            # Generate silent audio track so Plex client players have consistent audio stream
+            cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+
+        cmd += [
             "-vf", filter_str,
             "-c:v", "libx264",
             "-preset", "fast",
             "-crf", "22",
             "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(temp_output),
         ]
+
+        if has_audio:
+            if self.normalize_audio:
+                cmd += ["-af", "dynaudnorm=f=150:g=15:m=10.0", "-c:a", "aac", "-b:a", "192k"]
+            else:
+                cmd += ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+
+        cmd += ["-movflags", "+faststart", str(temp_output)]
+
         try:
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             if res.returncode != 0:
@@ -247,12 +308,13 @@ class GPhotosAlbumDownloader:
                 temp_output.unlink()
             return False
 
-    def normalize_existing_videos(self) -> int:
+    def normalize_existing_videos(self, force: bool = False) -> int:
         """
         Inspect all existing video files in the output directory and convert any
         portrait or non-16:9 videos into 1920x1080 16:9 pillarboxed MP4s.
+        If force is True, re-encodes all videos to apply nostalgic filter & audio normalization.
         """
-        logger.info("Checking existing video files in %s for portrait/aspect ratio issues...", self.output_dir)
+        logger.info("Checking existing video files in %s (force=%s)...", self.output_dir, force)
         fixed_count = 0
         for p in list(self.output_dir.iterdir()):
             if not p.is_file() or p.name.startswith(".") or p.name.endswith(".transcoding.mp4"):
@@ -261,12 +323,10 @@ class GPhotosAlbumDownloader:
                 continue
 
             w, h = self.get_video_dimensions(p)
-            # If it's not 16:9 landscape or height >= width, it needs normalization
-            if w and h and not self.is_standard_16_9(w, h):
-                logger.warning(
-                    "Detected non-16:9 / portrait video: %s (%dx%d). Normalizing to 1920x1080...",
-                    p.name, w, h
-                )
+            needs_normalization = force or (w and h and not self.is_standard_16_9(w, h))
+
+            if needs_normalization:
+                logger.info("Normalizing: %s (%sx%s)...", p.name, w or '?', h or '?')
                 backup_temp = p.with_suffix(".orig_fix" + p.suffix)
                 p.rename(backup_temp)
                 target_mp4 = p.with_suffix(".mp4")
@@ -278,7 +338,7 @@ class GPhotosAlbumDownloader:
                     logger.error("Failed to normalize %s. Restoring original.", p.name)
                     backup_temp.rename(p)
         if fixed_count > 0:
-            logger.info("Successfully normalized %d existing videos to 16:9 aspect ratio.", fixed_count)
+            logger.info("Successfully normalized %d existing videos.", fixed_count)
         return fixed_count
 
     def sync_album(self, dry_run: bool = False) -> List[Path]:

@@ -107,6 +107,35 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
         self.assertEqual((w2, h2), (1920, 1080))
         self.assertTrue(downloader.is_standard_16_9(w2, h2))
 
+    def test_visual_filters_and_audio_norm(self):
+        """Verify that sepia, bw, and disabled visual filters transcode successfully with audio norm."""
+        src_p = Path(self.test_dir) / "test_filter_src.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "testsrc=size=320x240:d=1",
+            "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+            "-t", "1",
+            str(src_p),
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(res.returncode, 0)
+
+        for filter_opt in [True, "sepia", "bw", False]:
+            dst_p = Path(self.test_dir) / f"test_filter_{filter_opt}.mp4"
+            dl = GPhotosAlbumDownloader(
+                album_url=self.album_url,
+                output_dir=self.test_dir,
+                transcode_to_mp4=True,
+                normalize_audio=True,
+                visual_filter=filter_opt,
+            )
+            success = dl.transcode_video_to_mp4(src_p, dst_p)
+            self.assertTrue(success, f"Transcoding failed for visual_filter={filter_opt}")
+            self.assertTrue(dst_p.exists())
+            w, h = dl.get_video_dimensions(dst_p)
+            self.assertEqual((w, h), (1920, 1080))
+            self.assertTrue(dl.has_audio_stream(dst_p))
+
 
 class TestIntroRotator(unittest.TestCase):
     def setUp(self):
