@@ -10,6 +10,7 @@ import logging
 import urllib.request
 import urllib.parse
 import subprocess
+import time
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any, Union
@@ -268,7 +269,7 @@ class GPhotosAlbumDownloader:
 
         has_audio = self.has_audio_stream(input_path)
 
-        cmd = [self.ffmpeg_path, "-y", "-i", str(input_path)]
+        cmd = [self.ffmpeg_path, "-y", "-nostdin", "-i", str(input_path)]
         if not has_audio:
             # Generate silent audio track so Plex client players have consistent audio stream
             cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
@@ -276,7 +277,7 @@ class GPhotosAlbumDownloader:
         cmd += [
             "-vf", filter_str,
             "-c:v", "libx264",
-            "-preset", "fast",
+            "-preset", "veryfast",
             "-crf", "22",
             "-pix_fmt", "yuv420p",
         ]
@@ -291,17 +292,23 @@ class GPhotosAlbumDownloader:
 
         cmd += ["-movflags", "+faststart", str(temp_output)]
 
+        start_t = time.time()
         try:
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            elapsed = time.time() - start_t
             if res.returncode != 0:
-                logger.error("FFmpeg transcoding failed for %s: %s", input_path.name, res.stderr.decode("utf-8", errors="ignore")[-400:])
+                logger.error("FFmpeg transcoding failed for %s (after %.1fs): %s", input_path.name, elapsed, res.stderr.decode("utf-8", errors="ignore")[-400:])
                 if temp_output.exists():
                     temp_output.unlink()
                 return False
 
             temp_output.replace(output_path)
-            logger.info("Successfully normalized %s -> %s (1920x1080 16:9)", input_path.name, output_path.name)
+            logger.info("Finished transcoding %s -> %s (took %.1fs)", input_path.name, output_path.name, elapsed)
             return True
+        except KeyboardInterrupt:
+            if temp_output.exists():
+                temp_output.unlink()
+            raise
         except Exception as e:
             logger.error("Error executing ffmpeg: %s", e)
             if temp_output.exists():

@@ -113,6 +113,7 @@ class IntroRotator:
         3. Rename chosen video to intro.mp4.
         4. Update state.
         """
+        orig_name = self.state.get("current_intro_original_name")
         restored_name = self.restore_current_intro(dry_run=dry_run)
 
         candidates = self.get_candidate_videos()
@@ -121,7 +122,8 @@ class IntroRotator:
             return None
 
         # Filter out the one just restored if there are alternatives
-        pool = [c for c in candidates if c.name != restored_name]
+        exclude = {n for n in (restored_name, orig_name) if n}
+        pool = [c for c in candidates if c.name not in exclude]
         if not pool:
             pool = candidates
 
