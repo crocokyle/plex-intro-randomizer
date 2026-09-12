@@ -344,7 +344,9 @@ class GPhotosAlbumDownloader:
 
             # Determine status
             if rem_w and rem_h and loc_w and loc_h:
-                if (rem_w, rem_h) == (loc_w, loc_h):
+                if (loc_w, loc_h) == (1920, 1080):
+                    status = "OK (1920x1080 16:9 canvas)"
+                elif (rem_w, rem_h) == (loc_w, loc_h):
                     status = "EXACT MATCH"
                 elif abs(rem_w - loc_w) <= 2 and abs(rem_h - loc_h) <= 2:
                     status = "MATCH (even rounded)"
@@ -408,8 +410,10 @@ class GPhotosAlbumDownloader:
         elif self.visual_filter == "vintage":
             vf_parts.append("curves=vintage")
 
-        # Preserve exact original aspect ratio and dimensions (ensuring even dimensions for H.264/yuv420p)
-        vf_parts.append("scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1")
+        # Preserve original aspect ratio inside 1920x1080 canvas with black bars:
+        vf_parts.append("scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2")
+        vf_parts.append("pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black")
+        vf_parts.append("setsar=1")
         filter_str = ",".join(vf_parts)
 
         has_audio = self.has_audio_stream(input_path)
@@ -474,7 +478,7 @@ class GPhotosAlbumDownloader:
                 continue
 
             w, h = self.get_video_dimensions(p)
-            needs_normalization = force or (p.suffix.lower() != ".mp4") or (w and h and (w % 2 != 0 or h % 2 != 0))
+            needs_normalization = force or (p.suffix.lower() != ".mp4") or (w != 1920 or h != 1080)
 
             if needs_normalization:
                 logger.info("Processing: %s (%sx%s)...", p.name, w or '?', h or '?')
@@ -588,7 +592,13 @@ class GPhotosAlbumDownloader:
 
                 # Check if transcoding/normalization is needed
                 w, h = self.get_video_dimensions(temp_download_path)
-                needs_transcode = force or not is_already_mp4 or self.visual_filter is not None or self.normalize_audio or (w and h and (w % 2 != 0 or h % 2 != 0))
+                needs_transcode = (
+                    force
+                    or not is_already_mp4
+                    or (w != 1920 or h != 1080)
+                    or self.visual_filter is not None
+                    or self.normalize_audio
+                )
 
                 if self.transcode_to_mp4 and needs_transcode:
                     logger.info("Transcoding/normalizing %s (%s, %sx%s)...", orig_filename, content_type, w or '?', h or '?')

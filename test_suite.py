@@ -70,13 +70,13 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
         self.assertTrue(dest_mp4.exists())
         self.assertGreater(dest_mp4.stat().st_size, 0)
 
-        # Verify output preserves original 320x240 dimensions
+        # Verify output is standardized 1920x1080 16:9 canvas
         w, h = downloader.get_video_dimensions(dest_mp4)
-        self.assertEqual(w, 320)
-        self.assertEqual(h, 240)
+        self.assertEqual(w, 1920)
+        self.assertEqual(h, 1080)
 
-    def test_portrait_aspect_ratio_preservation(self):
-        """Verify that a 720x1280 portrait video preserves its exact 9:16 aspect ratio and dimensions."""
+    def test_portrait_pillarbox_1080p(self):
+        """Verify that a 720x1280 portrait video is fitted into 1920x1080 canvas with pillarboxing."""
         portrait_src = Path(self.test_dir) / "vertical_clip.mp4"
         cmd = [
             "ffmpeg", "-y",
@@ -96,13 +96,13 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
         w, h = downloader.get_video_dimensions(portrait_src)
         self.assertEqual((w, h), (720, 1280))
 
-        # Run normalize_existing_videos with force=True
+        # Run normalize_existing_videos
         fixed = downloader.normalize_existing_videos(force=True)
         self.assertEqual(fixed, 1)
 
-        # Verify exact dimensions and 9:16 aspect ratio are preserved (not padded to 16:9)
+        # Verify output is 1920x1080 canvas with original 9:16 content centered inside
         w2, h2 = downloader.get_video_dimensions(portrait_src)
-        self.assertEqual((w2, h2), (720, 1280))
+        self.assertEqual((w2, h2), (1920, 1080))
 
     def test_visual_filters_and_audio_norm(self):
         """Verify that sepia, bw, and disabled visual filters transcode successfully with audio norm."""
@@ -130,7 +130,7 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
             self.assertTrue(success, f"Transcoding failed for visual_filter={filter_opt}")
             self.assertTrue(dst_p.exists())
             w, h = dl.get_video_dimensions(dst_p)
-            self.assertEqual((w, h), (320, 240))
+            self.assertEqual((w, h), (1920, 1080))
             self.assertTrue(dl.has_audio_stream(dst_p))
 
     def test_sync_album_force_and_clean(self):
