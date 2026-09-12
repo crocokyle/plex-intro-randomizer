@@ -212,6 +212,41 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
             self.assertFalse(stray_file.exists(), "Clean should have wiped stray_old_video.mp4")
             self.assertTrue(clip_path.exists(), "clip_alpha.mp4 should have been re-downloaded")
 
+    def test_probe_and_compare_resolutions(self):
+        """Verify probe_video_details accurately reads video metadata and compare_resolutions runs without error."""
+        sample_mp4 = Path(self.test_dir) / "probe_target.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=blue:s=640x480:d=1",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+            "-t", "1",
+            str(sample_mp4),
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(res.returncode, 0)
+
+        downloader = GPhotosAlbumDownloader(
+            album_url=self.album_url,
+            output_dir=self.test_dir,
+        )
+
+        details = downloader.probe_video_details(sample_mp4, is_url=False)
+        self.assertEqual(details["width"], 640)
+        self.assertEqual(details["height"], 480)
+        self.assertEqual(details["effective_width"], 640)
+        self.assertEqual(details["effective_height"], 480)
+
+        # Mock compare_resolutions
+        from unittest.mock import MagicMock
+        downloader.fetch_album_page = MagicMock(return_value=("<html>mock</html>", None))
+        downloader.extract_media_urls = MagicMock(return_value=["https://lh3.googleusercontent.com/pw/ITEM_1"])
+        downloader.get_media_info = MagicMock(return_value={
+            "download_url": str(sample_mp4),
+            "filename": "probe_target.mp4",
+            "content_type": "video/mp4",
+        })
+        downloader.compare_resolutions(limit=1)
+
 
 class TestIntroRotator(unittest.TestCase):
     def setUp(self):

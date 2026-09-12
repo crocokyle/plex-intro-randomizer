@@ -167,6 +167,24 @@ def run_status(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     print(json.dumps(status, indent=2))
 
 
+def run_compare(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+    """Compare original Google Photos video resolutions with local transcoded files."""
+    album_url = args.album_url or config.get("album_url") or DEFAULT_ALBUM_URL
+    if not album_url:
+        logger.error("Album URL is required. Specify with --album-url or in config.")
+        sys.exit(1)
+    video_dir = args.dir or config.get("video_directory")
+    if not video_dir:
+        logger.error("Video directory is required. Specify with --dir / -d or in config.")
+        sys.exit(1)
+
+    downloader = GPhotosAlbumDownloader(
+        album_url=album_url,
+        output_dir=video_dir,
+    )
+    downloader.compare_resolutions(limit=getattr(args, "limit", None))
+
+
 class DaemonRunner:
     def __init__(
         self,
@@ -404,6 +422,15 @@ def parse_args() -> argparse.Namespace:
     # status command
     subparsers.add_parser("status", help="Show current intro status, candidate videos, and state")
 
+    # compare command
+    cmp_parser = subparsers.add_parser("compare", help="Compare original Google Photos resolutions side-by-side with local transcoded files")
+    cmp_parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit number of videos to check",
+    )
+
     # daemon command
     daemon_parser = subparsers.add_parser("daemon", help="Run continuous background service (daily sync + hourly rotate)")
     daemon_parser.add_argument(
@@ -447,6 +474,8 @@ def main() -> None:
         run_rotate(args, config)
     elif args.command == "status":
         run_status(args, config)
+    elif args.command in ["compare", "check-resolutions"]:
+        run_compare(args, config)
     elif args.command == "daemon":
         run_daemon(args, config)
     else:

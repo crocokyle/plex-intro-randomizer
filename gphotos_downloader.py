@@ -214,6 +214,152 @@ class GPhotosAlbumDownloader:
             logger.debug("Could not probe dimensions for %s: %s", file_path.name, e)
             return None, None
 
+    def probe_video_details(self, target: str | Path, is_url: bool = False) -> Dict[str, Any]:
+        """Probe video stream for dimensions, SAR, DAR, and rotation."""
+        cmd = ["ffprobe", "-v", "error"]
+        if is_url:
+            cmd += ["-headers", f"User-Agent: {USER_AGENT}\r\n"]
+        cmd += [
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,sample_aspect_ratio,display_aspect_ratio:stream_tags=rotate:side_data_list",
+            "-of", "json",
+            str(target),
+        ]
+        try:
+            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
+            data = json.loads(res.stdout)
+            stream = data["streams"][0]
+            w = int(stream["width"])
+            h = int(stream["height"])
+            sar = stream.get("sample_aspect_ratio", "1:1")
+            dar = stream.get("display_aspect_ratio")
+            rot = 0
+            if "tags" in stream and "rotate" in stream["tags"]:
+                try:
+                    rot = int(stream["tags"]["rotate"])
+                except Exception:
+                    pass
+            if "side_data_list" in stream:
+                for sd in stream["side_data_list"]:
+                    if "rotation" in sd:
+                        try:
+                            rot = int(sd["rotation"])
+                        except Exception:
+                            pass
+            eff_w, eff_h = (h, w) if rot in (90, 270, -90, -270) else (w, h)
+            return {
+                "width": w,
+                "height": h,
+                "effective_width": eff_w,
+                "effective_height": eff_h,
+                "sar": sar,
+                "dar": dar,
+                "rotation": rot,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def compare_resolutions(self, limit: Optional[int] = None) -> None:
+        """Fetch video metadata from Google Photos and compare side-by-side with local transcoded files."""
+        html, _ = self.fetch_album_page()
+        base_urls = self.extract_media_urls(html)
+        if not base_urls:
+            logger.warning("No media items found in Google Photos album.")
+            return
+
+        if limit:
+            base_urls = base_urls[:limit]
+
+        # Check intro state
+        intro_state_file = self.output_dir / ".intro_state.json"
+        current_intro_orig = None
+        if intro_state_file.exists():
+            try:
+                with open(intro_state_file, "r", encoding="utf-8") as f:
+                    current_intro_orig = json.load(f).get("current_intro_original_name")
+            except Exception:
+                pass
+
+        print("\n" + "=" * 95)
+        print("GOOGLE PHOTOS ALBUM vs. LOCAL TRANSCODED VIDEOS COMPARISON")
+        print("=" * 95)
+        print(f"{'ORIGINAL FILENAME':<38} {'GOOGLE PHOTOS':<22} {'LOCAL MP4':<18} {'STATUS'}")
+        print("-" * 95)
+
+        for idx, base_url in enumerate(base_urls, start=1):
+            info = self.get_media_info(base_url)
+            if not info:
+                continue
+            content_type = info.get("content_type", "").lower()
+            orig_filename = info.get("filename", f"clip_{idx}.mp4")
+            download_url = info.get("download_url")
+
+            is_video = "video" in content_type or orig_filename.lower().endswith(
+                (".mp4", ".mov", ".wmv", ".mkv", ".avi", ".m4v", ".webm", ".flv", ".3gp")
+            )
+            if not is_video:
+                continue
+
+            stem = Path(orig_filename).stem
+            local_name = f"{stem}.mp4"
+            local_path = self.output_dir / local_name
+
+            if not local_path.exists():
+                media_id = base_url.split("/pw/")[-1]
+                alt_path = self.output_dir / f"{stem}_{media_id[:6]}.mp4"
+                if alt_path.exists():
+                    local_path = alt_path
+                    local_name = alt_path.name
+                elif current_intro_orig and (current_intro_orig == local_name or current_intro_orig == orig_filename):
+                    intro_path = self.output_dir / "intro.mp4"
+                    if intro_path.exists():
+                        local_path = intro_path
+                        local_name = "intro.mp4"
+
+            # Probe remote Google Photos file
+            remote_probe = self.probe_video_details(download_url, is_url=True)
+            if "error" in remote_probe:
+                remote_str = "Probe failed"
+                rem_w, rem_h = None, None
+            else:
+                rem_w = remote_probe["effective_width"]
+                rem_h = remote_probe["effective_height"]
+                rot = remote_probe.get("rotation", 0)
+                rot_str = f" [rot {rot}°]" if rot else ""
+                remote_str = f"{rem_w}x{rem_h}{rot_str}"
+
+            # Probe local file
+            if local_path.exists():
+                local_probe = self.probe_video_details(local_path, is_url=False)
+                if "error" in local_probe:
+                    local_str = "Corrupt"
+                    loc_w, loc_h = None, None
+                else:
+                    loc_w = local_probe["effective_width"]
+                    loc_h = local_probe["effective_height"]
+                    local_str = f"{loc_w}x{loc_h}"
+            else:
+                local_str = "Not Downloaded"
+                loc_w, loc_h = None, None
+
+            # Determine status
+            if rem_w and rem_h and loc_w and loc_h:
+                if (rem_w, rem_h) == (loc_w, loc_h):
+                    status = "EXACT MATCH"
+                elif abs(rem_w - loc_w) <= 2 and abs(rem_h - loc_h) <= 2:
+                    status = "MATCH (even rounded)"
+                else:
+                    status = f"DIFF: {rem_w}x{rem_h}->{loc_w}x{loc_h}"
+            elif not local_path.exists():
+                status = "MISSING LOCALLY"
+            else:
+                status = "UNKNOWN"
+
+            display_name = orig_filename if len(orig_filename) <= 36 else orig_filename[:33] + "..."
+            print(f"{display_name:<38} {remote_str:<22} {local_str:<18} {status}")
+
+        print("-" * 95 + "\n")
+
     def is_standard_16_9(self, width: Optional[int], height: Optional[int]) -> bool:
         """Check if video is roughly 16:9 landscape (e.g. 1.777 aspect ratio)."""
         if not width or not height or height <= 0:
