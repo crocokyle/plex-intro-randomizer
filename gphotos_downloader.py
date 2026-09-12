@@ -454,9 +454,9 @@ class GPhotosAlbumDownloader:
             temp_output.replace(output_path)
             logger.info("Finished transcoding %s -> %s (took %.1fs)", input_path.name, output_path.name, elapsed)
             return True
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, SystemExit):
             if temp_output.exists():
-                temp_output.unlink()
+                temp_output.unlink(missing_ok=True)
             raise
         except Exception as e:
             logger.error("Error executing ffmpeg: %s", e)
@@ -622,6 +622,10 @@ class GPhotosAlbumDownloader:
                 new_files.append(dest_path)
                 logger.info("Saved: %s (%d bytes)", dest_path.name, dest_path.stat().st_size)
 
+            except (KeyboardInterrupt, SystemExit):
+                if temp_download_path.exists():
+                    temp_download_path.unlink(missing_ok=True)
+                raise
             except Exception as e:
                 logger.error("Failed downloading %s: %s", orig_filename, e)
                 if temp_download_path.exists():

@@ -228,6 +228,7 @@ class DaemonRunner:
         sig_name = signal.Signals(signum).name
         logger.info("Received signal %s. Shutting down daemon gracefully...", sig_name)
         self.running = False
+        sys.exit(0)
 
     def run(self, initial_sync: bool = True, initial_rotate: bool = True) -> None:
         logger.info("Plex Intro Randomizer Daemon started.")
