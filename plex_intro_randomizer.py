@@ -101,6 +101,7 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         transcode_to_mp4=transcode,
         normalize_audio=normalize_audio,
         visual_filter=visual_filter,
+        target_intro_name=target_intro,
     )
     new_files = downloader.sync_album(dry_run=args.dry_run, force=force, clean=clean)
     logger.info("Sync finished. %d items downloaded / updated.", len(new_files))
@@ -215,6 +216,7 @@ class DaemonRunner:
             transcode_to_mp4=self.transcode_to_mp4,
             normalize_audio=self.normalize_audio,
             visual_filter=self.visual_filter,
+            target_intro_name=self.target_intro,
         )
         self.rotator = IntroRotator(
             video_dir=self.video_dir,

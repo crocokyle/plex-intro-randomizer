@@ -3,6 +3,7 @@ Comprehensive test suite for Plex Intro Randomizer and Google Photos Sync.
 """
 
 import os
+import json
 import shutil
 import tempfile
 import unittest
@@ -181,26 +182,33 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
                 pass
 
         with patch("urllib.request.urlopen", side_effect=lambda req, timeout=120: MockResponse(sample_bytes)):
-            # 1. Initial sync
+            # 1. Initial sync (clean dir) -> first downloaded video immediately becomes intro.mp4
             synced1 = downloader.sync_album(dry_run=False, force=False)
             self.assertEqual(len(synced1), 1)
-            clip_path = output_sync_dir / "clip_alpha.mp4"
-            self.assertTrue(clip_path.exists())
+            intro_path = output_sync_dir / "intro.mp4"
+            self.assertTrue(intro_path.exists(), "First download should become intro.mp4 immediately")
             self.assertIn("ITEM_ALPHA", downloader.manifest)
 
-            # 2. Second sync without force -> Should skip existing
+            # Check that .intro_state.json tracks original name
+            state_file = output_sync_dir / ".intro_state.json"
+            self.assertTrue(state_file.exists())
+            with open(state_file, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+            self.assertEqual(state_data["current_intro_original_name"], "clip_alpha.mp4")
+
+            # 2. Second sync without force -> Should skip existing (since intro.mp4 represents clip_alpha.mp4)
             synced2 = downloader.sync_album(dry_run=False, force=False)
             self.assertEqual(len(synced2), 0)
 
-            # 3. Tamper with file to verify force replace
-            clip_path.write_bytes(b"tampered_data")
-            self.assertEqual(clip_path.stat().st_size, len(b"tampered_data"))
+            # 3. Tamper with intro.mp4 to verify force replace
+            intro_path.write_bytes(b"tampered_data")
+            self.assertEqual(intro_path.stat().st_size, len(b"tampered_data"))
 
             # 4. Sync with force=True -> Should re-download and replace file
             synced3 = downloader.sync_album(dry_run=False, force=True)
             self.assertEqual(len(synced3), 1)
-            self.assertTrue(clip_path.exists())
-            self.assertNotEqual(clip_path.read_bytes(), b"tampered_data")
+            self.assertTrue(intro_path.exists())
+            self.assertNotEqual(intro_path.read_bytes(), b"tampered_data")
 
             # 5. Add an extra old file and sync with clean=True
             stray_file = output_sync_dir / "stray_old_video.mp4"
@@ -210,7 +218,7 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
             synced4 = downloader.sync_album(dry_run=False, force=True, clean=True)
             self.assertEqual(len(synced4), 1)
             self.assertFalse(stray_file.exists(), "Clean should have wiped stray_old_video.mp4")
-            self.assertTrue(clip_path.exists(), "clip_alpha.mp4 should have been re-downloaded")
+            self.assertTrue(intro_path.exists(), "intro.mp4 should have been re-downloaded and activated fresh")
 
     def test_probe_and_compare_resolutions(self):
         """Verify probe_video_details accurately reads video metadata and compare_resolutions runs without error."""

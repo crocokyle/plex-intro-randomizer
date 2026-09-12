@@ -13,6 +13,7 @@ import subprocess
 import time
 import tempfile
 import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any, Union
 
@@ -58,6 +59,7 @@ class GPhotosAlbumDownloader:
         transcode_to_mp4: bool = True,
         normalize_audio: bool = True,
         visual_filter: Any = True,
+        target_intro_name: str = "intro.mp4",
         ffmpeg_path: str = "ffmpeg",
     ):
         self.album_url = album_url
@@ -65,6 +67,7 @@ class GPhotosAlbumDownloader:
         self.transcode_to_mp4 = transcode_to_mp4
         self.normalize_audio = normalize_audio
         self.visual_filter = resolve_visual_filter(visual_filter)
+        self.target_intro_name = target_intro_name
         self.ffmpeg_path = ffmpeg_path
         self.manifest_path = self.output_dir / MANIFEST_FILENAME
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -531,6 +534,22 @@ class GPhotosAlbumDownloader:
                     self.manifest_path.unlink()
                 except Exception:
                     pass
+            intro_state_path = self.output_dir / ".intro_state.json"
+            if intro_state_path.exists():
+                try:
+                    intro_state_path.unlink()
+                except Exception:
+                    pass
+
+        intro_target_path = self.output_dir / self.target_intro_name
+        intro_state_file = self.output_dir / ".intro_state.json"
+        current_intro_orig = None
+        if intro_state_file.exists():
+            try:
+                with open(intro_state_file, "r", encoding="utf-8") as f:
+                    current_intro_orig = json.load(f).get("current_intro_original_name")
+            except Exception:
+                pass
 
         new_files: List[Path] = []
 
@@ -539,7 +558,13 @@ class GPhotosAlbumDownloader:
             if not force and media_id in self.manifest:
                 existing_record = self.manifest[media_id]
                 target_filename = existing_record.get("final_filename")
-                if target_filename and (self.output_dir / target_filename).exists():
+                file_present = False
+                if target_filename:
+                    if (self.output_dir / target_filename).exists():
+                        file_present = True
+                    elif intro_target_path.exists() and current_intro_orig == target_filename:
+                        file_present = True
+                if file_present:
                     logger.debug("[%d/%d] Item %s already downloaded as %s. Skipping.", idx, len(base_urls), media_id[:12], target_filename)
                     continue
 
@@ -569,10 +594,16 @@ class GPhotosAlbumDownloader:
                 final_filename = orig_filename
 
             # Ensure destination path
-            dest_path = self.output_dir / final_filename
-            if not force and dest_path.exists() and media_id not in self.manifest:
-                final_filename = f"{stem}_{media_id[:6]}.mp4"
+            is_active_intro = intro_target_path.exists() and current_intro_orig == final_filename
+            is_first_intro = not intro_target_path.exists() and len(new_files) == 0
+
+            if is_active_intro or is_first_intro:
+                dest_path = intro_target_path
+            else:
                 dest_path = self.output_dir / final_filename
+                if not force and dest_path.exists() and media_id not in self.manifest:
+                    final_filename = f"{stem}_{media_id[:6]}.mp4"
+                    dest_path = self.output_dir / final_filename
 
             action_desc = "Replacing" if (force and dest_path.exists()) else "Downloading"
             logger.info("[%d/%d] %s video: %s (Original: %s)", idx, len(base_urls), action_desc, final_filename, orig_filename)
@@ -613,6 +644,21 @@ class GPhotosAlbumDownloader:
                         continue
                 else:
                     shutil.move(str(temp_download_path), str(dest_path))
+
+                if is_first_intro:
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    state_data = {
+                        "current_intro_original_name": final_filename,
+                        "last_index": 0,
+                        "last_rotated_at": now_iso,
+                        "history": [{"name": final_filename, "rotated_at": now_iso}],
+                    }
+                    try:
+                        with open(intro_state_file, "w", encoding="utf-8") as f:
+                            json.dump(state_data, f, indent=2)
+                    except Exception as e:
+                        logger.warning("Could not write initial intro state: %s", e)
+                    logger.info("Activated first downloaded video '%s' immediately as '%s' for Plex!", final_filename, self.target_intro_name)
 
                 # Record in manifest
                 self.manifest[media_id] = {
