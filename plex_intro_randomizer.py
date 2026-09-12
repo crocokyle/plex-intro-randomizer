@@ -417,7 +417,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # rotate command
-    subparsers.add_parser("rotate", help="Rotate intro video once (renames previous intro safely and sets new random intro)")
+    subparsers.add_parser("rotate", help="Rotate intro video once (renames previous intro safely and cycles to next intro in sequence)")
 
     # status command
     subparsers.add_parser("status", help="Show current intro status, candidate videos, and state")

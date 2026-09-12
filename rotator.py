@@ -1,5 +1,5 @@
 """
-Module for rotating and randomizing Plex intros conflict-free.
+Module for sequentially cycling and rotating Plex intros conflict-free.
 """
 
 import os
@@ -121,17 +121,23 @@ class IntroRotator:
             logger.warning("No candidate video files found in %s to set as %s.", self.video_dir, self.target_intro_name)
             return None
 
-        # Filter out the one just restored if there are alternatives
-        exclude = {n for n in (restored_name, orig_name) if n}
-        pool = [c for c in candidates if c.name not in exclude]
-        if not pool:
-            pool = candidates
+        # Determine next candidate sequentially (alphabetical cycle)
+        candidate_names = [c.name for c in candidates]
+        prev_target = restored_name or orig_name
 
-        chosen = random.choice(pool)
+        if prev_target and prev_target in candidate_names:
+            prev_idx = candidate_names.index(prev_target)
+            next_idx = (prev_idx + 1) % len(candidates)
+        elif "last_index" in self.state and len(candidates) > 0:
+            next_idx = (self.state["last_index"] + 1) % len(candidates)
+        else:
+            next_idx = 0
+
+        chosen = candidates[next_idx]
         original_name = chosen.name
         intro_path = self.video_dir / self.target_intro_name
 
-        logger.info("Selected '%s' to become new '%s'.", original_name, self.target_intro_name)
+        logger.info("Selected '%s' (clip %d/%d) to become new '%s'.", original_name, next_idx + 1, len(candidates), self.target_intro_name)
 
         if dry_run:
             logger.info("[DRY RUN] Would rename '%s' -> '%s'", original_name, self.target_intro_name)
@@ -150,6 +156,7 @@ class IntroRotator:
             if len(history) > 100:
                 history = history[-100:]
 
+            self.state["last_index"] = next_idx
             self.state["current_intro_original_name"] = original_name
             self.state["last_rotated_at"] = now_iso
             self.state["history"] = history

@@ -266,25 +266,31 @@ class TestIntroRotator(unittest.TestCase):
         self.assertEqual(len(candidates), 3)
 
     def test_rotation_flow(self):
-        # 1. First rotation
-        res1 = self.rotator.rotate()
-        self.assertIsNotNone(res1)
         intro_path = Path(self.test_dir) / "intro.mp4"
+
+        # 1. First rotation -> clip A
+        res1 = self.rotator.rotate()
+        self.assertEqual(res1["chosen"], "intro_clip_A.mp4")
         self.assertTrue(intro_path.exists())
-        first_chosen = res1["chosen"]
-        self.assertIn(first_chosen, ["intro_clip_A.mp4", "intro_clip_B.mp4", "intro_clip_C.mp4"])
-        # The chosen file was renamed to intro.mp4, so remaining candidates should be 2
         self.assertEqual(len(self.rotator.get_candidate_videos()), 2)
 
-        # 2. Second rotation
+        # 2. Second rotation -> restores A, selects clip B
         res2 = self.rotator.rotate()
-        self.assertIsNotNone(res2)
-        # Check that the first chosen video was restored back to its original name!
-        restored_file = Path(self.test_dir) / first_chosen
-        self.assertTrue(restored_file.exists(), f"Expected {first_chosen} to be restored")
-        # Check that the second chosen video is different (since multiple candidates existed)
-        self.assertNotEqual(res2["chosen"], first_chosen)
-        self.assertTrue(intro_path.exists())
+        self.assertEqual(res2["restored"], "intro_clip_A.mp4")
+        self.assertEqual(res2["chosen"], "intro_clip_B.mp4")
+        self.assertTrue((Path(self.test_dir) / "intro_clip_A.mp4").exists())
+
+        # 3. Third rotation -> restores B, selects clip C
+        res3 = self.rotator.rotate()
+        self.assertEqual(res3["restored"], "intro_clip_B.mp4")
+        self.assertEqual(res3["chosen"], "intro_clip_C.mp4")
+        self.assertTrue((Path(self.test_dir) / "intro_clip_B.mp4").exists())
+
+        # 4. Fourth rotation -> restores C, cycles back to clip A
+        res4 = self.rotator.rotate()
+        self.assertEqual(res4["restored"], "intro_clip_C.mp4")
+        self.assertEqual(res4["chosen"], "intro_clip_A.mp4")
+        self.assertTrue((Path(self.test_dir) / "intro_clip_C.mp4").exists())
 
     def test_collision_conflict_avoidance(self):
         """If a file with the original name is placed while intro.mp4 is active, rotation should not overwrite it."""

@@ -3,7 +3,7 @@
 A robust, self-contained Python automation tool for **Linux Mint** (and other Linux distributions) that:
 1. **One-way syncs (downloads)** short video clips daily from a public Google Photos shared album.
 2. **Automatically transcodes** non-MP4 formats (such as `.MOV` and `.wmv`) to standard H.264/AAC `.mp4` using `ffmpeg` so Plex can Direct Play them without issues.
-3. **Randomizes Plex pre-roll intros every hour** by conflict-free renaming: restores the current `intro.mp4` safely to its original name and promotes a new random video to `intro.mp4`.
+3. **Sequentially cycles Plex pre-roll intros every hour** by conflict-free renaming: restores the current `intro.mp4` safely to its original name and promotes the next video in sequence to `intro.mp4`.
 4. **Supports both scheduling options**: run as a self-contained **systemd background service** or execute individual tasks via **cron**.
 
 ---
@@ -20,7 +20,7 @@ Google Photos Shared Album (https://photos.app.goo.gl/YOUR_ALBUM_KEY)
 │  - clip_1.mp4                                                          │
 │  - clip_2.mp4                                                          │
 │  - clip_3.mp4                                                          │
-│  - intro.mp4  <────── (Hourly rotation: swaps a random clip to intro) │
+│  - intro.mp4  <────── (Hourly rotation: cycles next clip to intro)     │
 │  - .intro_state.json (Tracks original filenames & avoids duplicates)   │
 │  - .download_manifest.json (Tracks synced Google Photos media)         │
 └────────────────────────────────────────────────────────────────────────┘
@@ -137,7 +137,7 @@ python3 plex_intro_randomizer.py -c config.json normalize -f
 ```
 
 ### Rotate Intro Video Once
-Safely restores the active `intro.mp4` to its original name and selects a new random video:
+Safely restores the active `intro.mp4` to its original name and cycles to the next video in alphabetical sequence:
 ```bash
 python3 plex_intro_randomizer.py -c config.json rotate
 ```
