@@ -349,7 +349,7 @@ class GPhotosAlbumDownloader:
             # Determine status
             if rem_w and rem_h and loc_w and loc_h:
                 if (loc_w, loc_h) == (1920, 1080):
-                    status = "OK (1920x1080 16:9 canvas)"
+                    status = "OK (1920x1080 16:9 Ambient Fill)"
                 elif (rem_w, rem_h) == (loc_w, loc_h):
                     status = "EXACT MATCH"
                 elif abs(rem_w - loc_w) <= 2 and abs(rem_h - loc_h) <= 2:
@@ -395,57 +395,123 @@ class GPhotosAlbumDownloader:
     def transcode_video_to_mp4(self, input_path: Path, output_path: Path) -> bool:
         """
         Transcode input video to standard 1920x1080 16:9 H.264/AAC MP4.
-        - Pillarboxes/letterboxes portrait and 4:3 videos with black bars.
+        - Preserves 100% exact foreground aspect ratio in the center of the frame.
+        - Fills empty borders with an ambient blurred & darkened echo of the video itself,
+          preventing Plex from double-letterboxing/windowboxing or stretching non-16:9 clips.
         - Applies a visual filter (sepia, bw / black & white, or vintage) if visual_filter is enabled.
-        - Normalizes audio loudness using EBU R128 (loudnorm) to prevent clipping and quiet audio.
+        - Normalizes audio loudness using dynaudnorm to prevent clipping and quiet audio.
+        - Logs detailed diagnostics before and after encoding for complete troubleshooting.
         """
-        logger.info(
-            "Transcoding & normalizing %s (preserving exact aspect ratio, visual_filter=%s, normalize_audio=%s) -> %s",
-            input_path.name, self.visual_filter, self.normalize_audio, output_path.name
-        )
         temp_output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         temp_output = Path(temp_output_file.name)
         temp_output_file.close()
 
-        # Build video filter chain
-        vf_parts = []
-        if self.visual_filter == "sepia":
-            vf_parts.append("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131")
-        elif self.visual_filter == "bw":
-            vf_parts.append("hue=s=0")
-        elif self.visual_filter == "vintage":
-            vf_parts.append("curves=vintage")
+        # Probe source video geometry and metadata for troubleshooting
+        src_details = self.probe_video_details(input_path)
+        src_w = src_details.get("width")
+        src_h = src_details.get("height")
+        eff_w = src_details.get("effective_width") or src_w
+        eff_h = src_details.get("effective_height") or src_h
+        sar = src_details.get("sar", "1:1")
+        dar = src_details.get("dar")
+        rot = src_details.get("rotation", 0)
 
-        # Preserve original aspect ratio inside 1920x1080 canvas with black bars:
-        vf_parts.append("scale=1920:1080:force_original_aspect_ratio=decrease:force_divisible_by=2")
-        vf_parts.append("pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black")
-        vf_parts.append("setsar=1")
-        filter_str = ",".join(vf_parts)
+        # Classify aspect ratio and calculate foreground positioning
+        if eff_w and eff_h and eff_h > 0:
+            aspect = eff_w / eff_h
+            if 1.75 <= aspect <= 1.80:
+                aspect_desc = f"16:9 Standard Widescreen ({aspect:.2f}:1) - Fills canvas natively"
+                fg_w, fg_h = 1920, 1080
+            elif 1.30 <= aspect <= 1.37:
+                aspect_desc = f"4:3 Classic SD ({aspect:.2f}:1) - Preserved in center with blurred sides"
+                fg_h = 1080
+                fg_w = int(1080 * aspect // 2 * 2)
+            elif 1.15 <= aspect <= 1.25:
+                aspect_desc = f"11:9 Mobile ({aspect:.2f}:1) - Preserved in center with blurred sides"
+                fg_h = 1080
+                fg_w = int(1080 * aspect // 2 * 2)
+            elif aspect < 1.0:
+                aspect_desc = f"Portrait / Vertical ({aspect:.2f}:1) - Preserved in center with blurred sides"
+                fg_h = 1080
+                fg_w = int(1080 * aspect // 2 * 2)
+            elif aspect > 1.80:
+                aspect_desc = f"Ultrawide / Scope ({aspect:.2f}:1) - Preserved in center with blurred top/bottom"
+                fg_w = 1920
+                fg_h = int(1920 / aspect // 2 * 2)
+            else:
+                aspect_desc = f"Custom ({aspect:.2f}:1) - Preserved in center with blurred ambient fill"
+                if aspect >= (1920 / 1080):
+                    fg_w = 1920
+                    fg_h = int(1920 / aspect // 2 * 2)
+                else:
+                    fg_h = 1080
+                    fg_w = int(1080 * aspect // 2 * 2)
+            x_offset = (1920 - fg_w) // 2
+            y_offset = (1080 - fg_h) // 2
+        else:
+            aspect_desc = "Unknown"
+            fg_w, fg_h, x_offset, y_offset = 1920, 1080, 0, 0
+
+        logger.info(
+            "[DIAGNOSTIC] Probing %s: Source=%sx%s (effective=%sx%s, SAR=%s, DAR=%s, Rot=%s°) | Classification: %s",
+            input_path.name, src_w or '?', src_h or '?', eff_w or '?', eff_h or '?', sar, dar or 'N/A', rot, aspect_desc
+        )
+        logger.info(
+            "[DIAGNOSTIC] 16:9 Canvas Plan: Foreground=%sx%s at (%d, %d) | Background=1920x1080 ambient blurred echo (darkened 12%%) | Filter=%s | AudioNorm=%s",
+            fg_w, fg_h, x_offset, y_offset, self.visual_filter, self.normalize_audio
+        )
+
+        # Build video filter chain:
+        # 1. Apply visual filter (bw, sepia, vintage) if enabled
+        # 2. Split stream into background and foreground branches
+        # 3. Background: scale to cover 1920x1080, crop, boxblur, darken by 12%
+        # 4. Foreground: scale to fit 1920x1080 preserving exact aspect ratio with setsar=1
+        # 5. Overlay foreground centered on background
+        vf_chain = []
+        if self.visual_filter == "sepia":
+            vf_chain.append("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131")
+        elif self.visual_filter == "bw":
+            vf_chain.append("hue=s=0")
+        elif self.visual_filter == "vintage":
+            vf_chain.append("curves=vintage")
+
+        pre_filter = (",".join(vf_chain) + ",") if vf_chain else ""
+        filter_str = (
+            f"[0:v]{pre_filter}split=2[in_bg][in_fg];"
+            "[in_bg]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,boxblur=luma_radius=min(h\\,w)/20:luma_power=2,eq=brightness=-0.12[bg];"
+            "[in_fg]scale=1920:1080:force_original_aspect_ratio=decrease,setsar=1[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[outv]"
+        )
 
         has_audio = self.has_audio_stream(input_path)
 
         cmd = [self.ffmpeg_path, "-y", "-nostdin", "-i", str(input_path)]
         if not has_audio:
-            # Generate silent audio track so Plex client players have consistent audio stream
+            # Generate silent stereo audio track so Plex client players have a consistent audio stream
             cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
 
         cmd += [
-            "-vf", filter_str,
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "22",
-            "-pix_fmt", "yuv420p",
+            "-filter_complex", filter_str,
+            "-map", "[outv]",
         ]
 
         if has_audio:
+            cmd += ["-map", "0:a:0"]
             if self.normalize_audio:
                 cmd += ["-af", "dynaudnorm=f=150:g=15:m=10.0", "-c:a", "aac", "-b:a", "192k"]
             else:
                 cmd += ["-c:a", "aac", "-b:a", "192k"]
         else:
-            cmd += ["-c:a", "aac", "-b:a", "192k", "-shortest"]
+            cmd += ["-map", "1:a:0", "-c:a", "aac", "-b:a", "192k", "-shortest"]
 
-        cmd += ["-movflags", "+faststart", str(temp_output)]
+        cmd += [
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "22",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(temp_output),
+        ]
 
         start_t = time.time()
         try:
@@ -459,7 +525,16 @@ class GPhotosAlbumDownloader:
                 return False
 
             shutil.move(str(temp_output), str(output_path))
-            logger.info("Finished transcoding %s -> %s (took %.1fs)", input_path.name, output_path.name, elapsed)
+            out_details = self.probe_video_details(output_path)
+            out_w = out_details.get("width")
+            out_h = out_details.get("height")
+            out_sar = out_details.get("sar")
+            out_dar = out_details.get("dar")
+            out_size_kb = output_path.stat().st_size / 1024
+            logger.info(
+                "[DIAGNOSTIC] Transcode complete for %s -> %s: Output=%sx%s (SAR=%s, DAR=%s, Size=%.1f KB, Duration=%.1fs)",
+                input_path.name, output_path.name, out_w, out_h, out_sar, out_dar, out_size_kb, elapsed
+            )
             return True
         except (KeyboardInterrupt, SystemExit):
             if temp_output.exists():
