@@ -70,13 +70,13 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
         self.assertTrue(dest_mp4.exists())
         self.assertGreater(dest_mp4.stat().st_size, 0)
 
-        # Verify output is 1920x1080 16:9
+        # Verify output preserves original 320x240 dimensions
         w, h = downloader.get_video_dimensions(dest_mp4)
-        self.assertEqual(w, 1920)
-        self.assertEqual(h, 1080)
+        self.assertEqual(w, 320)
+        self.assertEqual(h, 240)
 
-    def test_portrait_normalization(self):
-        """Verify that a 720x1280 portrait video is normalized to 1920x1080 16:9."""
+    def test_portrait_aspect_ratio_preservation(self):
+        """Verify that a 720x1280 portrait video preserves its exact 9:16 aspect ratio and dimensions."""
         portrait_src = Path(self.test_dir) / "vertical_clip.mp4"
         cmd = [
             "ffmpeg", "-y",
@@ -93,19 +93,16 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
             output_dir=self.test_dir,
             transcode_to_mp4=True,
         )
-        # Verify it detects as not standard 16:9
         w, h = downloader.get_video_dimensions(portrait_src)
         self.assertEqual((w, h), (720, 1280))
-        self.assertFalse(downloader.is_standard_16_9(w, h))
 
-        # Run normalize_existing_videos
-        fixed = downloader.normalize_existing_videos()
+        # Run normalize_existing_videos with force=True
+        fixed = downloader.normalize_existing_videos(force=True)
         self.assertEqual(fixed, 1)
 
-        # Verify normalized dimensions
+        # Verify exact dimensions and 9:16 aspect ratio are preserved (not padded to 16:9)
         w2, h2 = downloader.get_video_dimensions(portrait_src)
-        self.assertEqual((w2, h2), (1920, 1080))
-        self.assertTrue(downloader.is_standard_16_9(w2, h2))
+        self.assertEqual((w2, h2), (720, 1280))
 
     def test_visual_filters_and_audio_norm(self):
         """Verify that sepia, bw, and disabled visual filters transcode successfully with audio norm."""
@@ -133,7 +130,9 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
             self.assertTrue(success, f"Transcoding failed for visual_filter={filter_opt}")
             self.assertTrue(dst_p.exists())
             w, h = dl.get_video_dimensions(dst_p)
-            self.assertEqual((w, h), (1920, 1080))
+            self.assertEqual((w, h), (320, 240))
+            self.assertTrue(dl.has_audio_stream(dst_p))
+
     def test_sync_album_force_and_clean(self):
         """Verify that sync_album respects force=True (redownloads/replaces) and clean=True (wipes old clips)."""
         import io

@@ -113,13 +113,13 @@ python3 plex_intro_randomizer.py -c config.json --dry-run rotate
 ```
 
 ### One-Way Sync from Google Photos
-Download all new videos from the album (automatically transcoding and pillarboxing non-16:9/portrait clips):
+Download all new videos from the album (automatically transcoding non-MP4 formats while preserving exact native aspect ratios):
 ```bash
 python3 plex_intro_randomizer.py -c config.json sync
 ```
 
 ### Force Download All Videos & Replace Everything
-Force re-download all videos from the Google Photos album, re-applying visual filters and audio normalization, and overwriting/replacing all local files:
+Force re-download all videos from the Google Photos album, re-applying visual filters and audio normalization while preserving exact original aspect ratios, and overwriting/replacing all local files:
 ```bash
 python3 plex_intro_randomizer.py -c config.json redownload
 ```
@@ -130,10 +130,10 @@ If you also want to remove previous videos in the directory first (e.g. to clear
 python3 plex_intro_randomizer.py -c config.json redownload --clean
 ```
 
-### Fix / Normalize Existing Videos (Aspect Ratio Fix)
-If you have existing clips (such as portrait smartphone videos) that stretch on TV screens, this scans your video directory and normalizes them into 1920x1080 16:9 pillarboxed MP4s with black bars:
+### Process Existing Videos (Apply Filters & Normalize Audio)
+Scan your video directory to re-encode non-MP4 files or re-apply visual filters and audio loudness normalization to all existing videos:
 ```bash
-python3 plex_intro_randomizer.py -c config.json normalize
+python3 plex_intro_randomizer.py -c config.json normalize -f
 ```
 
 ### Rotate Intro Video Once

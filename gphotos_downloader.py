@@ -248,7 +248,7 @@ class GPhotosAlbumDownloader:
         - Normalizes audio loudness using EBU R128 (loudnorm) to prevent clipping and quiet audio.
         """
         logger.info(
-            "Transcoding & normalizing %s (16:9, visual_filter=%s, loudnorm=%s) -> %s",
+            "Transcoding & normalizing %s (preserving exact aspect ratio, visual_filter=%s, normalize_audio=%s) -> %s",
             input_path.name, self.visual_filter, self.normalize_audio, output_path.name
         )
         temp_output = output_path.with_suffix(".transcoding.mp4")
@@ -262,9 +262,8 @@ class GPhotosAlbumDownloader:
         elif self.visual_filter == "vintage":
             vf_parts.append("curves=vintage")
 
-        vf_parts.append("scale=1920:1080:force_original_aspect_ratio=decrease")
-        vf_parts.append("pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black")
-        vf_parts.append("setsar=1")
+        # Preserve exact original aspect ratio and dimensions (ensuring even dimensions for H.264/yuv420p)
+        vf_parts.append("scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1")
         filter_str = ",".join(vf_parts)
 
         has_audio = self.has_audio_stream(input_path)
@@ -317,9 +316,8 @@ class GPhotosAlbumDownloader:
 
     def normalize_existing_videos(self, force: bool = False) -> int:
         """
-        Inspect all existing video files in the output directory and convert any
-        portrait or non-16:9 videos into 1920x1080 16:9 pillarboxed MP4s.
-        If force is True, re-encodes all videos to apply nostalgic filter & audio normalization.
+        Inspect existing video files in output directory and ensure they are standard MP4s
+        with audio normalized and visual filters applied (preserving exact original aspect ratio).
         """
         logger.info("Checking existing video files in %s (force=%s)...", self.output_dir, force)
         fixed_count = 0
@@ -330,10 +328,10 @@ class GPhotosAlbumDownloader:
                 continue
 
             w, h = self.get_video_dimensions(p)
-            needs_normalization = force or (w and h and not self.is_standard_16_9(w, h))
+            needs_normalization = force or (p.suffix.lower() != ".mp4") or (w and h and (w % 2 != 0 or h % 2 != 0))
 
             if needs_normalization:
-                logger.info("Normalizing: %s (%sx%s)...", p.name, w or '?', h or '?')
+                logger.info("Processing: %s (%sx%s)...", p.name, w or '?', h or '?')
                 backup_temp = p.with_suffix(".orig_fix" + p.suffix)
                 p.rename(backup_temp)
                 target_mp4 = p.with_suffix(".mp4")
@@ -342,10 +340,10 @@ class GPhotosAlbumDownloader:
                     backup_temp.unlink(missing_ok=True)
                     fixed_count += 1
                 else:
-                    logger.error("Failed to normalize %s. Restoring original.", p.name)
+                    logger.error("Failed to process %s. Restoring original.", p.name)
                     backup_temp.rename(p)
         if fixed_count > 0:
-            logger.info("Successfully normalized %d existing videos.", fixed_count)
+            logger.info("Successfully processed %d existing videos.", fixed_count)
         return fixed_count
 
     def sync_album(self, dry_run: bool = False, force: bool = False, clean: bool = False) -> List[Path]:
@@ -444,10 +442,10 @@ class GPhotosAlbumDownloader:
 
                 # Check if transcoding/normalization is needed
                 w, h = self.get_video_dimensions(temp_download_path)
-                needs_transcode = force or not is_already_mp4 or not self.is_standard_16_9(w, h) or self.visual_filter is not None or self.normalize_audio
+                needs_transcode = force or not is_already_mp4 or self.visual_filter is not None or self.normalize_audio or (w and h and (w % 2 != 0 or h % 2 != 0))
 
                 if self.transcode_to_mp4 and needs_transcode:
-                    logger.info("Transcoding/normalizing %s (%s, %sx%s) to 16:9 MP4...", orig_filename, content_type, w, h)
+                    logger.info("Transcoding/normalizing %s (%s, %sx%s)...", orig_filename, content_type, w or '?', h or '?')
                     success = self.transcode_video_to_mp4(temp_download_path, dest_path)
                     temp_download_path.unlink(missing_ok=True)
                     if not success:
