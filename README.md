@@ -75,7 +75,8 @@ Edit `config.json` with your desired directories and intervals:
   "rotate_interval_minutes": 60,
   "transcode_to_mp4": true,
   "visual_filter": true,
-  "normalize_audio": true
+  "normalize_audio": true,
+  "max_workers": 3
 }
 ```
 
@@ -87,6 +88,7 @@ Edit `config.json` with your desired directories and intervals:
 * `transcode_to_mp4`: Automatically convert incoming non-MP4 videos to `.mp4` via `ffmpeg` (default: `true`).
 * `visual_filter`: Applies a nostalgic visual style to the clips (`true` or `"sepia"` for vintage sepia, `"bw"` for black & white, `"vintage"` for film curves, or `false` to turn off and keep original colors).
 * `normalize_audio`: Normalizes audio loudness to EBU R128 (`-16 LUFS`) so no clips clip or play too quietly (default: `true`).
+* `max_workers`: Number of concurrent worker threads for parallel downloading and FFmpeg transcoding (default: `3`).
 
 ### 3. Configure Plex Media Server
 1. Open **Plex Web App**.
@@ -129,6 +131,7 @@ If you also want to remove previous videos in the directory first (e.g. to clear
 ```bash
 python3 plex_intro_randomizer.py -c config.json redownload --clean
 ```
+*(You can pass `-w <count>` to increase parallel worker threads, e.g. `-w 4`)*
 
 ### Process Existing Videos (Apply Filters & Normalize Audio)
 Scan your video directory to re-encode non-MP4 files or re-apply visual filters and audio loudness normalization to all existing videos:

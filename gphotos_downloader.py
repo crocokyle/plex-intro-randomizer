@@ -13,6 +13,8 @@ import subprocess
 import time
 import tempfile
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any, Union
@@ -60,6 +62,7 @@ class GPhotosAlbumDownloader:
         normalize_audio: bool = True,
         visual_filter: Any = True,
         target_intro_name: str = "intro.mp4",
+        max_workers: int = 3,
         ffmpeg_path: str = "ffmpeg",
     ):
         self.album_url = album_url
@@ -68,6 +71,7 @@ class GPhotosAlbumDownloader:
         self.normalize_audio = normalize_audio
         self.visual_filter = resolve_visual_filter(visual_filter)
         self.target_intro_name = target_intro_name
+        self.max_workers = max(1, int(max_workers or 3))
         self.ffmpeg_path = ffmpeg_path
         self.manifest_path = self.output_dir / MANIFEST_FILENAME
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -503,10 +507,17 @@ class GPhotosAlbumDownloader:
             logger.info("Successfully processed %d existing videos.", fixed_count)
         return fixed_count
 
-    def sync_album(self, dry_run: bool = False, force: bool = False, clean: bool = False) -> List[Path]:
+    def sync_album(
+        self,
+        dry_run: bool = False,
+        force: bool = False,
+        clean: bool = False,
+        workers: Optional[int] = None,
+    ) -> List[Path]:
         """
         Run one-way sync. Downloads video clips from Google Photos, transcodes if necessary,
         and records downloaded items in the manifest.
+        Supports multi-threaded parallel downloads & transcoding (default: 3 workers).
         If force=True, re-downloads all clips and replaces existing files in the directory.
         If clean=True, removes existing video files in output_dir prior to downloading.
         Returns list of newly downloaded/transcoded video paths.
@@ -551,27 +562,38 @@ class GPhotosAlbumDownloader:
             except Exception:
                 pass
 
-        new_files: List[Path] = []
+        num_workers = max(1, workers if workers is not None else self.max_workers)
+        logger.info("Syncing %d album items using %d worker thread(s)...", len(base_urls), num_workers)
 
-        for idx, base_url in enumerate(base_urls, start=1):
+        # Thread synchronization locks
+        manifest_lock = threading.Lock()
+        intro_lock = threading.Lock()
+        claimed_names_lock = threading.Lock()
+        claimed_names: set = set()
+        first_intro_claimed = [False]
+        new_files: List[Path] = []
+        new_files_lock = threading.Lock()
+
+        def process_item(idx: int, base_url: str) -> Optional[Path]:
             media_id = base_url.split("/pw/")[-1]
-            if not force and media_id in self.manifest:
-                existing_record = self.manifest[media_id]
-                target_filename = existing_record.get("final_filename")
-                file_present = False
-                if target_filename:
-                    if (self.output_dir / target_filename).exists():
-                        file_present = True
-                    elif intro_target_path.exists() and current_intro_orig == target_filename:
-                        file_present = True
-                if file_present:
-                    logger.debug("[%d/%d] Item %s already downloaded as %s. Skipping.", idx, len(base_urls), media_id[:12], target_filename)
-                    continue
+            with manifest_lock:
+                if not force and media_id in self.manifest:
+                    existing_record = self.manifest[media_id]
+                    target_filename = existing_record.get("final_filename")
+                    file_present = False
+                    if target_filename:
+                        if (self.output_dir / target_filename).exists():
+                            file_present = True
+                        elif intro_target_path.exists() and current_intro_orig == target_filename:
+                            file_present = True
+                    if file_present:
+                        logger.debug("[%d/%d] Item %s already downloaded as %s. Skipping.", idx, len(base_urls), media_id[:12], target_filename)
+                        return None
 
             info = self.get_media_info(base_url)
             if not info:
                 logger.warning("[%d/%d] Could not retrieve media info for %s", idx, len(base_urls), base_url)
-                continue
+                return None
 
             content_type = info.get("content_type", "").lower()
             orig_filename = info.get("filename", f"clip_{idx}.mp4")
@@ -583,9 +605,9 @@ class GPhotosAlbumDownloader:
             )
             if not is_video:
                 logger.info("[%d/%d] Skipping non-video item: %s (%s)", idx, len(base_urls), orig_filename, content_type)
-                continue
+                return None
 
-            # Determine final filename (always .mp4)
+            # Determine final filename
             stem = Path(orig_filename).stem
             is_already_mp4 = orig_filename.lower().endswith(".mp4")
             if self.transcode_to_mp4:
@@ -593,26 +615,17 @@ class GPhotosAlbumDownloader:
             else:
                 final_filename = orig_filename
 
-            # Ensure destination path
-            is_active_intro = intro_target_path.exists() and current_intro_orig == final_filename
-            is_first_intro = not intro_target_path.exists() and len(new_files) == 0
-
-            if is_active_intro or is_first_intro:
-                dest_path = intro_target_path
-            else:
-                dest_path = self.output_dir / final_filename
-                if not force and dest_path.exists() and media_id not in self.manifest:
+            with claimed_names_lock:
+                if final_filename in claimed_names:
                     final_filename = f"{stem}_{media_id[:6]}.mp4"
-                    dest_path = self.output_dir / final_filename
+                claimed_names.add(final_filename)
 
-            action_desc = "Replacing" if (force and dest_path.exists()) else "Downloading"
-            logger.info("[%d/%d] %s video: %s (Original: %s)", idx, len(base_urls), action_desc, final_filename, orig_filename)
+            logger.info("[%d/%d] Downloading: %s (Original: %s)", idx, len(base_urls), final_filename, orig_filename)
 
             if dry_run:
                 logger.info("[DRY RUN] Would download and sync: %s", final_filename)
-                continue
+                return None
 
-            # Download to a local temporary file first
             with tempfile.NamedTemporaryFile(delete=False, suffix=Path(orig_filename).suffix) as tmp_f:
                 temp_download_path = Path(tmp_f.name)
 
@@ -635,51 +648,98 @@ class GPhotosAlbumDownloader:
                     or self.normalize_audio
                 )
 
+                temp_transcode_path = None
                 if self.transcode_to_mp4 and needs_transcode:
-                    logger.info("Transcoding/normalizing %s (%s, %sx%s)...", orig_filename, content_type, w or '?', h or '?')
-                    success = self.transcode_video_to_mp4(temp_download_path, dest_path)
+                    logger.info("Transcoding/normalizing [%d/%d] %s (%s, %sx%s)...", idx, len(base_urls), orig_filename, content_type, w or '?', h or '?')
+                    temp_transcode_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                    temp_transcode_path = Path(temp_transcode_file.name)
+                    temp_transcode_file.close()
+
+                    success = self.transcode_video_to_mp4(temp_download_path, temp_transcode_path)
                     temp_download_path.unlink(missing_ok=True)
                     if not success:
+                        if temp_transcode_path.exists():
+                            temp_transcode_path.unlink(missing_ok=True)
                         logger.error("Failed to transcode %s; skipping.", orig_filename)
-                        continue
+                        return None
+                    source_for_dest = temp_transcode_path
                 else:
-                    shutil.move(str(temp_download_path), str(dest_path))
+                    source_for_dest = temp_download_path
 
-                if is_first_intro:
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    state_data = {
-                        "current_intro_original_name": final_filename,
-                        "last_index": 0,
-                        "last_rotated_at": now_iso,
-                        "history": [{"name": final_filename, "rotated_at": now_iso}],
-                    }
-                    try:
-                        with open(intro_state_file, "w", encoding="utf-8") as f:
-                            json.dump(state_data, f, indent=2)
-                    except Exception as e:
-                        logger.warning("Could not write initial intro state: %s", e)
-                    logger.info("Activated first downloaded video '%s' immediately as '%s' for Plex!", final_filename, self.target_intro_name)
+                with intro_lock:
+                    is_active_intro = intro_target_path.exists() and current_intro_orig == final_filename
+                    is_first_intro = not intro_target_path.exists() and not first_intro_claimed[0]
+
+                    if is_active_intro or is_first_intro:
+                        dest_path = intro_target_path
+                        if is_first_intro:
+                            first_intro_claimed[0] = True
+                    else:
+                        dest_path = self.output_dir / final_filename
+
+                    shutil.move(str(source_for_dest), str(dest_path))
+
+                    if is_first_intro:
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        state_data = {
+                            "current_intro_original_name": final_filename,
+                            "last_index": 0,
+                            "last_rotated_at": now_iso,
+                            "history": [{"name": final_filename, "rotated_at": now_iso}],
+                        }
+                        try:
+                            with open(intro_state_file, "w", encoding="utf-8") as f:
+                                json.dump(state_data, f, indent=2)
+                        except Exception as e:
+                            logger.warning("Could not write initial intro state: %s", e)
+                        logger.info("Activated first completed video '%s' immediately as '%s' for Plex!", final_filename, self.target_intro_name)
 
                 # Record in manifest
-                self.manifest[media_id] = {
-                    "original_filename": orig_filename,
-                    "final_filename": final_filename,
-                    "content_type": content_type,
-                    "size_bytes": dest_path.stat().st_size,
-                    "synced_at": urllib.parse.quote(str(os.path.getmtime(dest_path))),
-                }
-                self._save_manifest()
-                new_files.append(dest_path)
-                logger.info("Saved: %s (%d bytes)", dest_path.name, dest_path.stat().st_size)
+                with manifest_lock:
+                    self.manifest[media_id] = {
+                        "original_filename": orig_filename,
+                        "final_filename": final_filename,
+                        "content_type": content_type,
+                        "size_bytes": dest_path.stat().st_size,
+                        "synced_at": urllib.parse.quote(str(os.path.getmtime(dest_path))),
+                    }
+                    self._save_manifest()
+
+                with new_files_lock:
+                    new_files.append(dest_path)
+
+                logger.info("Saved [%d/%d]: %s (%d bytes)", idx, len(base_urls), dest_path.name, dest_path.stat().st_size)
+                return dest_path
 
             except (KeyboardInterrupt, SystemExit):
                 if temp_download_path.exists():
                     temp_download_path.unlink(missing_ok=True)
                 raise
             except Exception as e:
-                logger.error("Failed downloading %s: %s", orig_filename, e)
+                logger.error("Failed processing %s: %s", orig_filename, e)
                 if temp_download_path.exists():
                     temp_download_path.unlink(missing_ok=True)
+                return None
+
+        if num_workers <= 1:
+            for idx, base_url in enumerate(base_urls, start=1):
+                process_item(idx, base_url)
+        else:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                futures = [executor.submit(process_item, idx, base_url) for idx, base_url in enumerate(base_urls, start=1)]
+                try:
+                    for fut in as_completed(futures):
+                        try:
+                            fut.result()
+                        except (KeyboardInterrupt, SystemExit):
+                            for f in futures:
+                                f.cancel()
+                            raise
+                        except Exception as e:
+                            logger.error("Worker error: %s", e)
+                except (KeyboardInterrupt, SystemExit):
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
 
         # Also inspect and normalize any existing videos already in directory
         if self.transcode_to_mp4 and not dry_run:

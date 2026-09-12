@@ -220,6 +220,63 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
             self.assertFalse(stray_file.exists(), "Clean should have wiped stray_old_video.mp4")
             self.assertTrue(intro_path.exists(), "intro.mp4 should have been re-downloaded and activated fresh")
 
+    def test_parallel_multi_worker_sync(self):
+        """Verify that multi-worker parallel syncing downloads multiple clips and assigns one intro.mp4."""
+        import io
+        from unittest.mock import patch, MagicMock
+
+        sample_mp4 = Path(self.test_dir) / "source_parallel.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=640x360:d=1",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+            "-t", "1",
+            str(sample_mp4),
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(res.returncode, 0)
+        sample_bytes = sample_mp4.read_bytes()
+
+        output_sync_dir = Path(self.test_dir) / "intros_parallel"
+        output_sync_dir.mkdir(parents=True, exist_ok=True)
+
+        downloader = GPhotosAlbumDownloader(
+            album_url=self.album_url,
+            output_dir=output_sync_dir,
+            transcode_to_mp4=True,
+            normalize_audio=False,
+            visual_filter="none",
+            max_workers=3,
+        )
+
+        downloader.fetch_album_page = MagicMock(return_value=("<html>mock</html>", None))
+        downloader.extract_media_urls = MagicMock(return_value=[
+            "https://lh3.googleusercontent.com/pw/ITEM_1",
+            "https://lh3.googleusercontent.com/pw/ITEM_2",
+            "https://lh3.googleusercontent.com/pw/ITEM_3",
+        ])
+        downloader.get_media_info = MagicMock(side_effect=lambda url: {
+            "download_url": "https://example.com/video.mp4",
+            "filename": f"clip_{url.split('_')[-1]}.mp4",
+            "content_type": "video/mp4",
+        })
+
+        class MockResponse:
+            def __init__(self, data):
+                self._io = io.BytesIO(data)
+            def read(self, size=65536):
+                return self._io.read(size)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        with patch("urllib.request.urlopen", side_effect=lambda req, timeout=120: MockResponse(sample_bytes)):
+            synced = downloader.sync_album(dry_run=False, force=True, clean=True, workers=3)
+            self.assertEqual(len(synced), 3)
+            self.assertTrue((output_sync_dir / "intro.mp4").exists())
+            self.assertEqual(len(downloader.manifest), 3)
+
     def test_probe_and_compare_resolutions(self):
         """Verify probe_video_details accurately reads video metadata and compare_resolutions runs without error."""
         sample_mp4 = Path(self.test_dir) / "probe_target.mp4"
