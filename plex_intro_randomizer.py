@@ -73,7 +73,7 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
 
     transcode = config.get("transcode_to_mp4", True) if args.transcode is None else args.transcode
     normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
-    visual_filter = args.visual_filter if args.visual_filter is not None else config.get("visual_filter", config.get("nostalgic_filter", True))
+    visual_filter = config.get("visual_filter", False)
 
     force = getattr(args, "force", False) or args.command in ["redownload", "force-download"]
     clean = getattr(args, "clean", False)
@@ -120,7 +120,7 @@ def run_normalize(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         sys.exit(1)
 
     normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
-    visual_filter = args.visual_filter if args.visual_filter is not None else config.get("visual_filter", config.get("nostalgic_filter", True))
+    visual_filter = config.get("visual_filter", False)
 
     logger.info("Scanning %s to fix aspect ratios, audio levels, and visual filters...", video_dir)
     logger.info("Visual Filter: %s | Normalize Audio: %s | Force All: %s", visual_filter, normalize_audio, args.force)
@@ -283,7 +283,7 @@ def run_daemon(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     rotate_mins = args.rotate_interval if args.rotate_interval is not None else config.get("rotate_interval_minutes", DEFAULT_ROTATE_INTERVAL_MINUTES)
     transcode = config.get("transcode_to_mp4", True) if args.transcode is None else args.transcode
     normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
-    visual_filter = args.visual_filter if args.visual_filter is not None else config.get("visual_filter", config.get("nostalgic_filter", True))
+    visual_filter = config.get("visual_filter", False)
 
     runner = DaemonRunner(
         video_dir=video_dir,
@@ -328,19 +328,6 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Disable automatic transcoding of non-MP4 videos to MP4",
         default=None,
-    )
-    parser.add_argument(
-        "--visual-filter",
-        choices=["sepia", "bw", "vintage", "none"],
-        help="Visual filter preset: 'sepia', 'bw' (black & white), 'vintage', or 'none'",
-        default=None,
-    )
-    parser.add_argument(
-        "--no-visual-filter",
-        dest="visual_filter",
-        action="store_const",
-        const="none",
-        help="Disable visual filters (keep original colors)",
     )
     parser.add_argument(
         "--normalize-audio",
@@ -404,7 +391,7 @@ def parse_args() -> argparse.Namespace:
     )
 
     # normalize command
-    norm_parser = subparsers.add_parser("normalize", help="Scan existing intro directory and fix portrait/aspect ratio issues by pillarboxing to 16:9")
+    norm_parser = subparsers.add_parser("normalize", help="Process existing videos to apply config filters and audio normalization")
     norm_parser.add_argument(
         "-f", "--force",
         action="store_true",
