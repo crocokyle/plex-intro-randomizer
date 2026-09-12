@@ -12,6 +12,7 @@ import urllib.parse
 import subprocess
 import time
 import tempfile
+import shutil
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any, Union
 
@@ -399,7 +400,9 @@ class GPhotosAlbumDownloader:
             "Transcoding & normalizing %s (preserving exact aspect ratio, visual_filter=%s, normalize_audio=%s) -> %s",
             input_path.name, self.visual_filter, self.normalize_audio, output_path.name
         )
-        temp_output = output_path.with_suffix(".transcoding.mp4")
+        temp_output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        temp_output = Path(temp_output_file.name)
+        temp_output_file.close()
 
         # Build video filter chain
         vf_parts = []
@@ -446,12 +449,13 @@ class GPhotosAlbumDownloader:
             res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             elapsed = time.time() - start_t
             if res.returncode != 0:
-                logger.error("FFmpeg transcoding failed for %s (after %.1fs): %s", input_path.name, elapsed, res.stderr.decode("utf-8", errors="ignore")[-400:])
+                err_msg = res.stderr.decode("utf-8", errors="ignore")
+                logger.error("FFmpeg transcoding failed for %s (after %.1fs): %s", input_path.name, elapsed, err_msg[-2000:])
                 if temp_output.exists():
-                    temp_output.unlink()
+                    temp_output.unlink(missing_ok=True)
                 return False
 
-            temp_output.replace(output_path)
+            shutil.move(str(temp_output), str(output_path))
             logger.info("Finished transcoding %s -> %s (took %.1fs)", input_path.name, output_path.name, elapsed)
             return True
         except (KeyboardInterrupt, SystemExit):
@@ -461,7 +465,7 @@ class GPhotosAlbumDownloader:
         except Exception as e:
             logger.error("Error executing ffmpeg: %s", e)
             if temp_output.exists():
-                temp_output.unlink()
+                temp_output.unlink(missing_ok=True)
             return False
 
     def normalize_existing_videos(self, force: bool = False) -> int:
@@ -577,8 +581,8 @@ class GPhotosAlbumDownloader:
                 logger.info("[DRY RUN] Would download and sync: %s", final_filename)
                 continue
 
-            # Download to a temporary file first
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(orig_filename).suffix, dir=str(self.output_dir)) as tmp_f:
+            # Download to a local temporary file first
+            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(orig_filename).suffix) as tmp_f:
                 temp_download_path = Path(tmp_f.name)
 
             try:
@@ -608,7 +612,7 @@ class GPhotosAlbumDownloader:
                         logger.error("Failed to transcode %s; skipping.", orig_filename)
                         continue
                 else:
-                    temp_download_path.replace(dest_path)
+                    shutil.move(str(temp_download_path), str(dest_path))
 
                 # Record in manifest
                 self.manifest[media_id] = {
