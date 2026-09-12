@@ -90,6 +90,7 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
             clean = True
 
     target_intro = config.get("target_intro_name", DEFAULT_TARGET_INTRO)
+    workers = getattr(args, "workers", None) or config.get("max_workers") or config.get("workers") or 3
 
     logger.info("Starting Google Photos album sync...")
     logger.info("Album URL: %s", album_url)
@@ -97,6 +98,7 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     logger.info("Transcode non-MP4: %s", transcode)
     logger.info("Normalize Audio (EBU R128): %s", normalize_audio)
     logger.info("Visual Filter: %s", visual_filter)
+    logger.info("Workers: %d", workers)
     logger.info("Force Re-download / Replace All: %s", force)
     if clean:
         logger.info("Clean Directory Before Download: True")
@@ -116,8 +118,9 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         normalize_audio=normalize_audio,
         visual_filter=visual_filter,
         target_intro_name=target_intro,
+        max_workers=workers,
     )
-    new_files = downloader.sync_album(dry_run=args.dry_run, force=force, clean=clean, limit=limit)
+    new_files = downloader.sync_album(dry_run=args.dry_run, force=force, clean=clean, limit=limit, workers=workers)
     logger.info("Sync finished. %d items downloaded / updated.", len(new_files))
 
     if (force or clean) and not args.dry_run:
@@ -442,6 +445,7 @@ class DaemonRunner:
         transcode_to_mp4: bool = True,
         normalize_audio: bool = True,
         visual_filter: Any = True,
+        workers: int = 3,
         dry_run: bool = False,
     ):
         self.video_dir = Path(video_dir)
@@ -452,6 +456,7 @@ class DaemonRunner:
         self.transcode_to_mp4 = transcode_to_mp4
         self.normalize_audio = normalize_audio
         self.visual_filter = visual_filter
+        self.workers = max(1, int(workers or 3))
         self.dry_run = dry_run
         self.running = True
 
@@ -462,6 +467,7 @@ class DaemonRunner:
             normalize_audio=self.normalize_audio,
             visual_filter=self.visual_filter,
             target_intro_name=self.target_intro,
+            max_workers=self.workers,
         )
         self.rotator = IntroRotator(
             video_dir=self.video_dir,
@@ -483,6 +489,7 @@ class DaemonRunner:
         logger.info("Sync interval: %.1f hours (%.0f s)", self.sync_interval_secs / 3600, self.sync_interval_secs)
         logger.info("Rotate interval: %.1f minutes (%.0f s)", self.rotate_interval_secs / 60, self.rotate_interval_secs)
         logger.info("Visual Filter: %s | Normalize Audio: %s", self.visual_filter, self.normalize_audio)
+        logger.info("Workers: %d", self.workers)
 
         last_sync_time = 0.0
         last_rotate_time = 0.0
@@ -490,7 +497,7 @@ class DaemonRunner:
         if initial_sync:
             try:
                 logger.info("Running startup Google Photos sync...")
-                self.downloader.sync_album(dry_run=self.dry_run)
+                self.downloader.sync_album(dry_run=self.dry_run, workers=self.workers)
             except Exception as e:
                 logger.error("Initial sync encountered an error: %s", e)
             last_sync_time = time.time()
@@ -519,7 +526,7 @@ class DaemonRunner:
             if now - last_sync_time >= self.sync_interval_secs:
                 try:
                     logger.info("Scheduled daily sync triggered.")
-                    self.downloader.sync_album(dry_run=self.dry_run)
+                    self.downloader.sync_album(dry_run=self.dry_run, workers=self.workers)
                 except Exception as e:
                     logger.error("Error during scheduled sync: %s", e)
                 last_sync_time = time.time()
@@ -551,6 +558,8 @@ def run_daemon(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
     visual_filter = config.get("visual_filter", False)
 
+    workers = getattr(args, "workers", None) or config.get("max_workers") or config.get("workers") or 3
+
     runner = DaemonRunner(
         video_dir=video_dir,
         album_url=album_url,
@@ -560,6 +569,7 @@ def run_daemon(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         transcode_to_mp4=transcode,
         normalize_audio=normalize_audio,
         visual_filter=visual_filter,
+        workers=workers,
         dry_run=args.dry_run,
     )
     runner.run(
@@ -622,6 +632,8 @@ def parse_args() -> argparse.Namespace:
 
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
 
+    worker_help = "Number of concurrent download/transcode workers (default: 3, or configured in config.json)"
+
     # sync command
     sync_parser = subparsers.add_parser("sync", help="Run one-way download sync from Google Photos album")
     sync_parser.add_argument(
@@ -641,6 +653,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Limit number of videos to download/process (e.g. --first 5)",
     )
+    sync_parser.add_argument("-w", "--workers", type=int, default=None, help=worker_help)
 
     # redownload / force-download command
     redownload_parser = subparsers.add_parser(
@@ -659,6 +672,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Limit number of videos to download/process (e.g. --first 5)",
     )
+    redownload_parser.add_argument("-w", "--workers", type=int, default=None, help=worker_help)
 
     force_dl_parser = subparsers.add_parser(
         "force-download",
@@ -676,6 +690,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Limit number of videos to download/process (e.g. --first 5)",
     )
+    force_dl_parser.add_argument("-w", "--workers", type=int, default=None, help=worker_help)
 
     # first-five / first-5 command for fast testing
     first_five_parser = subparsers.add_parser(
@@ -701,6 +716,7 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Number of videos to download (default: 5)",
     )
+    first_five_parser.add_argument("-w", "--workers", type=int, default=None, help=worker_help)
 
     first_5_parser = subparsers.add_parser(
         "first-5",
@@ -725,6 +741,7 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Number of videos to download (default: 5)",
     )
+    first_5_parser.add_argument("-w", "--workers", type=int, default=None, help=worker_help)
 
     # normalize command
     norm_parser = subparsers.add_parser("normalize", help="Process existing videos to apply config filters and audio normalization")
@@ -773,6 +790,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Skip immediate intro rotation upon daemon startup",
     )
+    daemon_parser.add_argument("-w", "--workers", type=int, default=None, help=worker_help)
 
     # test-pattern command
     pattern_parser = subparsers.add_parser(

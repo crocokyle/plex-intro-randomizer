@@ -6,5 +6,6 @@
   "rotate_interval_minutes": 60,
   "transcode_to_mp4": true,
   "visual_filter": true,
-  "normalize_audio": true
+  "normalize_audio": true,
+  "max_workers": 3
 }

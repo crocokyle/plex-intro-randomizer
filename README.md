@@ -75,7 +75,8 @@ Edit `config.json` with your desired directories and intervals:
   "rotate_interval_minutes": 60,
   "transcode_to_mp4": true,
   "visual_filter": true,
-  "normalize_audio": true
+  "normalize_audio": true,
+  "max_workers": 3
 }
 ```
 
@@ -87,6 +88,7 @@ Edit `config.json` with your desired directories and intervals:
 * `transcode_to_mp4`: Automatically convert incoming non-MP4 videos to `.mp4` via `ffmpeg` (default: `true`).
 * `visual_filter`: Applies a nostalgic visual style to the clips (`true` or `"sepia"` for vintage sepia, `"bw"` for black & white, `"vintage"` for film curves, or `false` to turn off and keep original colors).
 * `normalize_audio`: Normalizes audio loudness to EBU R128 (`-16 LUFS`) so no clips clip or play too quietly (default: `true`).
+* `max_workers`: Number of concurrent worker threads for parallel downloading and transcoding (default: `3`).
 
 ### 3. Configure Plex Media Server
 1. Open **Plex Web App**.
@@ -142,6 +144,16 @@ You can also specify custom limits on `first-five`, `redownload`, or `sync`:
 python3 plex_intro_randomizer.py -c config.json first-five -n 3
 # or
 python3 plex_intro_randomizer.py -c config.json redownload --clean --first 5
+```
+
+### Multi-Threaded Parallel Downloads & Transcoding
+By default or via `"max_workers"` in `config.json`, the randomizer processes downloads and transcodes concurrently using worker threads. You can also specify `-w` / `--workers` on any sync, redownload, first-five, or daemon command:
+```bash
+# Sync with 4 concurrent workers
+python3 plex_intro_randomizer.py -c config.json sync -w 4
+
+# Redownload everything with 6 workers
+python3 plex_intro_randomizer.py -c config.json redownload -w 6
 ```
 
 ### Process Existing Videos (Apply Filters & Normalize Audio)

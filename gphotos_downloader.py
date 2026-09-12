@@ -13,6 +13,8 @@ import subprocess
 import time
 import tempfile
 import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple, Any, Union
@@ -61,6 +63,7 @@ class GPhotosAlbumDownloader:
         visual_filter: Any = True,
         target_intro_name: str = "intro.mp4",
         ffmpeg_path: str = "ffmpeg",
+        max_workers: int = 3,
     ):
         self.album_url = album_url
         self.output_dir = Path(output_dir)
@@ -69,6 +72,7 @@ class GPhotosAlbumDownloader:
         self.visual_filter = resolve_visual_filter(visual_filter)
         self.target_intro_name = target_intro_name
         self.ffmpeg_path = ffmpeg_path
+        self.max_workers = max(1, int(max_workers or 3))
         self.manifest_path = self.output_dir / MANIFEST_FILENAME
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.manifest = self._load_manifest()
@@ -584,6 +588,7 @@ class GPhotosAlbumDownloader:
         force: bool = False,
         clean: bool = False,
         limit: Optional[int] = None,
+        workers: Optional[int] = None,
     ) -> List[Path]:
         """
         Run one-way sync. Downloads video clips from Google Photos, transcodes if necessary,
@@ -591,6 +596,7 @@ class GPhotosAlbumDownloader:
         If force=True, re-downloads all clips and replaces existing files in the directory.
         If clean=True, removes existing video files in output_dir prior to downloading.
         If limit is specified, stops after downloading/processing the specified number of videos.
+        workers specifies the number of concurrent worker threads (defaults to self.max_workers).
         Returns list of newly downloaded/transcoded video paths.
         """
         html, _ = self.fetch_album_page()
@@ -601,6 +607,11 @@ class GPhotosAlbumDownloader:
 
         if limit and limit > 0:
             logger.info("Limit specified: downloading up to %d videos from album.", limit)
+
+        num_workers = max(1, int(workers if workers is not None else self.max_workers))
+        if limit and limit > 0:
+            num_workers = min(num_workers, limit)
+        logger.info("Workers: %d", num_workers)
 
         if clean and not dry_run:
             logger.info("Clean option enabled. Removing existing video files in %s...", self.output_dir)
@@ -636,18 +647,32 @@ class GPhotosAlbumDownloader:
             except Exception:
                 pass
 
-        new_files: List[Path] = []
-        downloaded_count = 0
+        claimed_names = set(p.name for p in self.output_dir.iterdir() if p.is_file())
+        claimed_names_lock = threading.Lock()
+        intro_lock = threading.Lock()
+        count_lock = threading.Lock()
 
-        for idx, base_url in enumerate(base_urls, start=1):
-            if limit and limit > 0 and downloaded_count >= limit:
-                logger.info("Reached download limit of %d videos. Stopping sync.", limit)
-                break
+        first_intro_claimed = [False]
+        downloaded_count = [0]
+        stop_event = threading.Event()
+        new_files: List[Path] = []
+
+        def process_item(idx: int, base_url: str) -> Optional[Path]:
+            if stop_event.is_set():
+                return None
+
+            with count_lock:
+                if limit and limit > 0 and downloaded_count[0] >= limit:
+                    stop_event.set()
+                    return None
 
             media_id = base_url.split("/pw/")[-1]
-            if not force and media_id in self.manifest:
-                existing_record = self.manifest[media_id]
-                target_filename = existing_record.get("final_filename")
+            with intro_lock:
+                already_in_manifest = (not force) and (media_id in self.manifest)
+                manifest_record = self.manifest.get(media_id) if already_in_manifest else None
+
+            if already_in_manifest and manifest_record:
+                target_filename = manifest_record.get("final_filename")
                 file_present = False
                 if target_filename:
                     if (self.output_dir / target_filename).exists():
@@ -655,14 +680,20 @@ class GPhotosAlbumDownloader:
                     elif intro_target_path.exists() and current_intro_orig == target_filename:
                         file_present = True
                 if file_present:
-                    downloaded_count += 1
+                    with count_lock:
+                        downloaded_count[0] += 1
+                        if limit and limit > 0 and downloaded_count[0] >= limit:
+                            stop_event.set()
                     logger.debug("[%d/%d] Item %s already downloaded as %s. Skipping.", idx, len(base_urls), media_id[:12], target_filename)
-                    continue
+                    return None
 
             info = self.get_media_info(base_url)
             if not info:
                 logger.warning("[%d/%d] Could not retrieve media info for %s", idx, len(base_urls), base_url)
-                continue
+                return None
+
+            if stop_event.is_set():
+                return None
 
             content_type = info.get("content_type", "").lower()
             orig_filename = info.get("filename", f"clip_{idx}.mp4")
@@ -674,7 +705,7 @@ class GPhotosAlbumDownloader:
             )
             if not is_video:
                 logger.info("[%d/%d] Skipping non-video item: %s (%s)", idx, len(base_urls), orig_filename, content_type)
-                continue
+                return None
 
             # Determine final filename (always .mp4)
             stem = Path(orig_filename).stem
@@ -684,37 +715,37 @@ class GPhotosAlbumDownloader:
             else:
                 final_filename = orig_filename
 
-            # Ensure destination path
-            is_active_intro = intro_target_path.exists() and current_intro_orig == final_filename
-            is_first_intro = not intro_target_path.exists() and len(new_files) == 0
-
-            if is_active_intro or is_first_intro:
-                dest_path = intro_target_path
-            else:
-                dest_path = self.output_dir / final_filename
-                if not force and dest_path.exists() and media_id not in self.manifest:
+            with claimed_names_lock:
+                if final_filename in claimed_names:
                     final_filename = f"{stem}_{media_id[:6]}.mp4"
-                    dest_path = self.output_dir / final_filename
+                claimed_names.add(final_filename)
 
-            action_desc = "Replacing" if (force and dest_path.exists()) else "Downloading"
-            logger.info("[%d/%d] %s video: %s (Original: %s)", idx, len(base_urls), action_desc, final_filename, orig_filename)
+            logger.info("[%d/%d] Downloading: %s (Original: %s)", idx, len(base_urls), final_filename, orig_filename)
 
             if dry_run:
                 logger.info("[DRY RUN] Would download and sync: %s", final_filename)
-                continue
+                return None
 
             # Download to a local temporary file first
             with tempfile.NamedTemporaryFile(delete=False, suffix=Path(orig_filename).suffix) as tmp_f:
                 temp_download_path = Path(tmp_f.name)
 
+            temp_transcode_path = None
             try:
                 dl_req = urllib.request.Request(download_url, headers={"User-Agent": USER_AGENT})
                 with urllib.request.urlopen(dl_req, timeout=120) as resp, open(temp_download_path, "wb") as out_f:
                     while True:
+                        if stop_event.is_set():
+                            break
                         chunk = resp.read(64 * 1024)
                         if not chunk:
                             break
                         out_f.write(chunk)
+
+                if stop_event.is_set():
+                    if temp_download_path.exists():
+                        temp_download_path.unlink(missing_ok=True)
+                    return None
 
                 # Check if transcoding/normalization is needed
                 w, h = self.get_video_dimensions(temp_download_path)
@@ -727,54 +758,115 @@ class GPhotosAlbumDownloader:
                 )
 
                 if self.transcode_to_mp4 and needs_transcode:
-                    logger.info("Transcoding/normalizing %s (%s, %sx%s)...", orig_filename, content_type, w or '?', h or '?')
-                    success = self.transcode_video_to_mp4(temp_download_path, dest_path)
+                    logger.info("Transcoding/normalizing [%d/%d] %s (%s, %sx%s)...", idx, len(base_urls), orig_filename, content_type, w or '?', h or '?')
+                    temp_transcode_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                    temp_transcode_path = Path(temp_transcode_file.name)
+                    temp_transcode_file.close()
+
+                    success = self.transcode_video_to_mp4(temp_download_path, temp_transcode_path)
                     temp_download_path.unlink(missing_ok=True)
                     if not success:
+                        if temp_transcode_path.exists():
+                            temp_transcode_path.unlink(missing_ok=True)
                         logger.error("Failed to transcode %s; skipping.", orig_filename)
-                        continue
+                        return None
+                    source_for_dest = temp_transcode_path
                 else:
-                    shutil.move(str(temp_download_path), str(dest_path))
+                    source_for_dest = temp_download_path
 
-                if is_first_intro:
-                    now_iso = datetime.now(timezone.utc).isoformat()
-                    state_data = {
-                        "current_intro_original_name": final_filename,
-                        "last_index": 0,
-                        "last_rotated_at": now_iso,
-                        "history": [{"name": final_filename, "rotated_at": now_iso}],
+                with intro_lock:
+                    if limit and limit > 0 and downloaded_count[0] >= limit:
+                        stop_event.set()
+                        if source_for_dest.exists():
+                            source_for_dest.unlink(missing_ok=True)
+                        return None
+
+                    is_active_intro = intro_target_path.exists() and current_intro_orig == final_filename
+                    is_first_intro = not intro_target_path.exists() and not first_intro_claimed[0]
+
+                    if is_active_intro or is_first_intro:
+                        dest_path = intro_target_path
+                        if is_first_intro:
+                            first_intro_claimed[0] = True
+                    else:
+                        dest_path = self.output_dir / final_filename
+
+                    shutil.move(str(source_for_dest), str(dest_path))
+
+                    if is_first_intro:
+                        now_iso = datetime.now(timezone.utc).isoformat()
+                        state_data = {
+                            "current_intro_original_name": final_filename,
+                            "last_index": 0,
+                            "last_rotated_at": now_iso,
+                            "history": [{"name": final_filename, "rotated_at": now_iso}],
+                        }
+                        try:
+                            with open(intro_state_file, "w", encoding="utf-8") as f:
+                                json.dump(state_data, f, indent=2)
+                        except Exception as e:
+                            logger.warning("Could not write initial intro state: %s", e)
+                        logger.info("Activated first completed video '%s' immediately as '%s' for Plex!", final_filename, self.target_intro_name)
+
+                    # Record in manifest
+                    self.manifest[media_id] = {
+                        "original_filename": orig_filename,
+                        "final_filename": final_filename,
+                        "content_type": content_type,
+                        "size_bytes": dest_path.stat().st_size,
+                        "synced_at": urllib.parse.quote(str(os.path.getmtime(dest_path))),
                     }
-                    try:
-                        with open(intro_state_file, "w", encoding="utf-8") as f:
-                            json.dump(state_data, f, indent=2)
-                    except Exception as e:
-                        logger.warning("Could not write initial intro state: %s", e)
-                    logger.info("Activated first downloaded video '%s' immediately as '%s' for Plex!", final_filename, self.target_intro_name)
+                    self._save_manifest()
 
-                # Record in manifest
-                self.manifest[media_id] = {
-                    "original_filename": orig_filename,
-                    "final_filename": final_filename,
-                    "content_type": content_type,
-                    "size_bytes": dest_path.stat().st_size,
-                    "synced_at": urllib.parse.quote(str(os.path.getmtime(dest_path))),
-                }
-                self._save_manifest()
-                new_files.append(dest_path)
-                downloaded_count += 1
-                logger.info("Saved: %s (%d bytes) [%d/%s]", dest_path.name, dest_path.stat().st_size, downloaded_count, limit if limit else len(base_urls))
-                if limit and limit > 0 and downloaded_count >= limit:
-                    logger.info("Reached download limit of %d videos. Stopping sync.", limit)
-                    break
+                    new_files.append(dest_path)
+                    downloaded_count[0] += 1
+                    current_count = downloaded_count[0]
+                    if limit and limit > 0 and downloaded_count[0] >= limit:
+                        stop_event.set()
+
+                logger.info("Saved [%d/%d]: %s (%d bytes) [%d/%s]", idx, len(base_urls), dest_path.name, dest_path.stat().st_size, current_count, limit if limit else len(base_urls))
+                return dest_path
 
             except (KeyboardInterrupt, SystemExit):
                 if temp_download_path.exists():
                     temp_download_path.unlink(missing_ok=True)
+                if temp_transcode_path and temp_transcode_path.exists():
+                    temp_transcode_path.unlink(missing_ok=True)
                 raise
             except Exception as e:
-                logger.error("Failed downloading %s: %s", orig_filename, e)
+                logger.error("Failed processing %s: %s", orig_filename, e)
                 if temp_download_path.exists():
                     temp_download_path.unlink(missing_ok=True)
+                if temp_transcode_path and temp_transcode_path.exists():
+                    temp_transcode_path.unlink(missing_ok=True)
+                return None
+
+        if num_workers <= 1:
+            for idx, base_url in enumerate(base_urls, start=1):
+                if stop_event.is_set():
+                    break
+                process_item(idx, base_url)
+        else:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                futures = [executor.submit(process_item, idx, base_url) for idx, base_url in enumerate(base_urls, start=1)]
+                try:
+                    for fut in as_completed(futures):
+                        try:
+                            fut.result()
+                        except (KeyboardInterrupt, SystemExit):
+                            stop_event.set()
+                            for f in futures:
+                                f.cancel()
+                            raise
+                        except Exception as e:
+                            logger.error("Worker error: %s", e)
+                        if stop_event.is_set():
+                            for f in futures:
+                                f.cancel()
+                except (KeyboardInterrupt, SystemExit):
+                    stop_event.set()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    raise
 
         # Also inspect and normalize any existing videos already in directory
         if self.transcode_to_mp4 and not dry_run:
