@@ -162,6 +162,33 @@ Display active intro, total candidate videos, and rotation history:
 python3 plex_intro_randomizer.py -c config.json status
 ```
 
+### Empirical Aspect Ratio Testing
+
+#### 1. Geometry Calibration Card (`test-pattern`)
+Generates a calibration test card with mathematically perfect green concentric circles, crosshairs, and 4:3 / 16:9 boundary grids, and sets it as `intro.mp4`:
+```bash
+python3 plex_intro_randomizer.py -c config.json test-pattern
+# Or to test a native 4:3 canvas:
+python3 plex_intro_randomizer.py -c config.json test-pattern --aspect 4:3
+```
+*Play any title on Plex to see `intro.mp4`. If the rings are round, the player geometry is true; if they are oval, the player or TV is actively squishing or stretching the video.*
+
+#### 2. Test Scaling Modes on a Real Clip (`test-clip`)
+Render any clip in your directory with a specific scaling mode and immediately activate it as `intro.mp4`:
+```bash
+# Test 16:9 Ambient Blurred Background Echo (true center proportions, blurred sides)
+python3 plex_intro_randomizer.py -c config.json test-clip --mode blur
+
+# Test 16:9 Crop & Zoom (fills 100% widescreen TV edge-to-edge, zero bars, zero blur)
+python3 plex_intro_randomizer.py -c config.json test-clip --mode zoom
+
+# Test Pure Native Resolution (raw 4:3 / mobile dimensions, no 1080p canvas padding)
+python3 plex_intro_randomizer.py -c config.json test-clip --mode native
+
+# Test Stretch to 16:9 (forced full screen stretch)
+python3 plex_intro_randomizer.py -c config.json test-clip --mode stretch
+```
+
 ---
 
 ## Running as a Background Service (Option A - Recommended)

@@ -11,6 +11,10 @@ import json
 import signal
 import logging
 import argparse
+import tempfile
+import shutil
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -194,6 +198,235 @@ def run_compare(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         output_dir=video_dir,
     )
     downloader.compare_resolutions(limit=getattr(args, "limit", None))
+
+
+def generate_calibration_video(output_path: Path, aspect: str = "16:9", duration_secs: int = 10) -> bool:
+    """Generate an aspect ratio calibration card video with concentric circles and grid borders."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        logger.error("Pillow (PIL) is required to generate calibration pattern. Install with: pip install pillow")
+        return False
+
+    if aspect == "4:3":
+        w, h = 1440, 1080
+    else:
+        w, h = 1920, 1080
+
+    img = Image.new("RGB", (w, h), color=(15, 18, 25))
+    draw = ImageDraw.Draw(img)
+
+    # Outer border (Cyan)
+    draw.rectangle([10, 10, w - 10, h - 10], outline=(0, 255, 255), width=5)
+
+    if aspect == "16:9":
+        # 4:3 boundary box (Yellow) - 1440x1080 centered: x from 240 to 1680
+        draw.rectangle([240, 10, 1680, h - 10], outline=(255, 220, 0), width=4)
+        draw.text((255, 25), "YELLOW BOX = 4:3 BOUNDARY (1440x1080)", fill=(255, 220, 0))
+        draw.text((25, 25), "CYAN FRAME = 16:9 FULLSCREEN (1920x1080)", fill=(0, 255, 255))
+    else:
+        draw.text((25, 25), "CYAN FRAME = NATIVE 4:3 CONTAINER (1440x1080)", fill=(0, 255, 255))
+
+    # Concentric circles in center
+    cx, cy = w // 2, h // 2
+    for r in [150, 250, 350]:
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=(0, 255, 0), width=4)
+
+    # Center crosshair
+    draw.line([cx - 400, cy, cx + 400, cy], fill=(0, 255, 0), width=2)
+    draw.line([cx, cy - 400, cx, cy + 400], fill=(0, 255, 0), width=2)
+
+    # Text instructions
+    draw.text((cx - 240, cy - 80), "ASPECT RATIO GEOMETRY TEST", fill=(255, 255, 255))
+    draw.text((cx - 290, cy - 40), "• If green rings are ROUND: Aspect ratio is TRUE.", fill=(180, 255, 180))
+    draw.text((cx - 290, cy - 10), "• If green rings are OVAL (tall/skinny): Squeezed horizontally.", fill=(255, 180, 180))
+    draw.text((cx - 290, cy + 20), "• If green rings are OVAL (wide/flat): Stretched horizontally.", fill=(255, 220, 180))
+    draw.text((cx - 290, cy + 60), f"CANVAS: {w}x{h} ({aspect}) with square pixels (1:1 SAR)", fill=(200, 220, 255))
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp_img:
+        tmp_img_path = Path(tmp_img.name)
+    img.save(str(tmp_img_path))
+
+    cmd = [
+        "ffmpeg", "-y", "-loop", "1", "-i", str(tmp_img_path),
+        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+        "-t", str(duration_secs),
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    tmp_img_path.unlink(missing_ok=True)
+    return res.returncode == 0
+
+
+def run_test_pattern(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+    """Generate an aspect ratio calibration card with perfect circles and set it as intro.mp4."""
+    video_dir = args.dir or config.get("video_directory")
+    if not video_dir:
+        logger.error("Video directory is required. Specify with --dir / -d or in config.")
+        sys.exit(1)
+    target_intro = config.get("target_intro_name", DEFAULT_TARGET_INTRO)
+    dest_path = Path(video_dir) / target_intro
+    aspect = getattr(args, "aspect", "16:9")
+
+    logger.info("Generating %s Aspect Ratio Calibration Card...", aspect)
+    temp_file = Path(tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name)
+    success = generate_calibration_video(temp_file, aspect=aspect)
+    if not success:
+        logger.error("Failed to generate calibration video.")
+        sys.exit(1)
+
+    rotator = IntroRotator(video_dir=video_dir, target_intro_name=target_intro)
+    rotator.restore_current_intro(dry_run=args.dry_run)
+
+    shutil.move(str(temp_file), str(dest_path))
+    state_file = Path(video_dir) / ".intro_state.json"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state_data = {
+        "current_intro_original_name": f"calibration_pattern_{aspect.replace(':', 'x')}.mp4",
+        "last_index": 0,
+        "last_rotated_at": now_iso,
+        "history": [{"name": f"calibration_pattern_{aspect.replace(':', 'x')}.mp4", "rotated_at": now_iso}],
+    }
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state_data, f, indent=2)
+    except Exception as e:
+        logger.warning("Could not update intro state: %s", e)
+
+    print("\n" + "=" * 80)
+    print(f"CALIBRATION INTRO ACTIVATED: {dest_path.name} ({aspect} Canvas)")
+    print("=" * 80)
+    print("Now go to Plex and press PLAY on any movie or TV show to see the pre-roll intro.")
+    print("Look at the green concentric rings in the center:")
+    print("  • If the rings are perfectly ROUND:")
+    print(f"    -> Your Plex player is rendering {aspect} with correct, undistorted 1:1 geometry.")
+    print("  • If the rings are an OVAL (skinny / squished horizontally):")
+    print("    -> Your player or TV is actively compressing the video horizontally!")
+    print("=" * 80 + "\n")
+
+
+def run_test_clip(args: argparse.Namespace, config: Dict[str, Any]) -> None:
+    """Render a test video using a specific mode (blur, zoom, native, stretch) and set it as intro.mp4."""
+    video_dir = args.dir or config.get("video_directory")
+    if not video_dir:
+        logger.error("Video directory is required. Specify with --dir / -d or in config.")
+        sys.exit(1)
+    target_intro = config.get("target_intro_name", DEFAULT_TARGET_INTRO)
+    dest_path = Path(video_dir) / target_intro
+    mode = getattr(args, "mode", "blur").lower()
+    album_url = args.album_url or config.get("album_url") or DEFAULT_ALBUM_URL
+
+    rotator = IntroRotator(video_dir=video_dir, target_intro_name=target_intro)
+    candidates = rotator.get_candidate_videos()
+    clip_source = None
+    if getattr(args, "clip", None):
+        specified = Path(args.clip)
+        if specified.exists():
+            clip_source = specified
+        elif (Path(video_dir) / specified.name).exists():
+            clip_source = Path(video_dir) / specified.name
+
+    if not clip_source and candidates:
+        clip_source = candidates[0]
+
+    if not clip_source:
+        intro_f = Path(video_dir) / target_intro
+        if intro_f.exists():
+            clip_source = intro_f
+
+    if not clip_source:
+        logger.info("No candidate video found locally. Downloading clip 1 from album...")
+        dl = GPhotosAlbumDownloader(album_url=album_url, output_dir=video_dir, transcode_to_mp4=False)
+        downloaded = dl.sync_album(dry_run=False, limit=1)
+        if downloaded:
+            clip_source = downloaded[0]
+        else:
+            logger.error("Could not find or download any video clip to test.")
+            sys.exit(1)
+
+    logger.info("Using source clip: %s", clip_source.name)
+    dl = GPhotosAlbumDownloader(album_url=album_url, output_dir=video_dir, transcode_to_mp4=True)
+    probe = dl.probe_video_details(clip_source)
+    w = probe.get("effective_width") or probe.get("width")
+    h = probe.get("effective_height") or probe.get("height")
+    sar = probe.get("sar", "1:1")
+    dar = probe.get("dar")
+    logger.info("[DIAGNOSTIC] Source: %sx%s (SAR=%s, DAR=%s)", w or '?', h or '?', sar, dar or 'N/A')
+
+    temp_out = Path(tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name)
+
+    if mode == "zoom":
+        vf = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1"
+        mode_desc = "16:9 Crop & Zoom (fills 100% of widescreen with zero bars and zero blur)"
+        cmd = [dl.ffmpeg_path, "-y", "-i", str(clip_source), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
+    elif mode == "native":
+        vf = "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1"
+        mode_desc = "Pure Native Resolution (no 16:9 canvas padding, no blur)"
+        cmd = [dl.ffmpeg_path, "-y", "-i", str(clip_source), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
+    elif mode == "stretch":
+        vf = "scale=1920:1080,setsar=1"
+        mode_desc = "Stretch to 16:9 (forced full screen stretch)"
+        cmd = [dl.ffmpeg_path, "-y", "-i", str(clip_source), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
+    else:  # blur
+        mode = "blur"
+        mode_desc = "16:9 Ambient Blurred Background Echo (true center proportions, blurred sides)"
+        fstr = (
+            "[0:v]split=2[in_bg][in_fg];"
+            "[in_bg]scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,boxblur=luma_radius=min(h\\,w)/20:luma_power=2,eq=brightness=-0.12[bg];"
+            "[in_fg]scale=1920:1080:force_original_aspect_ratio=decrease,setsar=1[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1[outv]"
+        )
+        cmd = [dl.ffmpeg_path, "-y", "-i", str(clip_source), "-filter_complex", fstr, "-map", "[outv]", "-map", "0:a?"]
+
+    cmd += [
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k",
+        "-movflags", "+faststart",
+        str(temp_out)
+    ]
+
+    logger.info("Transcoding test clip with mode '%s' (%s)...", mode, mode_desc)
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if res.returncode != 0:
+        logger.error("FFmpeg failed: %s", res.stderr.decode("utf-8", errors="ignore")[-1000:])
+        temp_out.unlink(missing_ok=True)
+        sys.exit(1)
+
+    rotator.restore_current_intro(dry_run=args.dry_run)
+    shutil.move(str(temp_out), str(dest_path))
+
+    out_probe = dl.probe_video_details(dest_path)
+    out_w = out_probe.get("width")
+    out_h = out_probe.get("height")
+    out_sar = out_probe.get("sar")
+    out_dar = out_probe.get("dar")
+
+    state_file = Path(video_dir) / ".intro_state.json"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    state_data = {
+        "current_intro_original_name": f"{clip_source.stem}_test_{mode}.mp4",
+        "last_index": 0,
+        "last_rotated_at": now_iso,
+        "history": [{"name": f"{clip_source.stem}_test_{mode}.mp4", "rotated_at": now_iso}],
+    }
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump(state_data, f, indent=2)
+    except Exception as e:
+        logger.warning("Could not update intro state: %s", e)
+
+    print("\n" + "=" * 80)
+    print(f"TEST CLIP ACTIVATED: {dest_path.name}")
+    print(f"Source Video: {clip_source.name} ({w}x{h})")
+    print(f"Render Mode:  {mode.upper()} -> {mode_desc}")
+    print(f"Output File:  {out_w}x{out_h} (SAR={out_sar}, DAR={out_dar})")
+    print("=" * 80)
+    print("Now go to Plex and press PLAY to see how this mode looks on your screen!")
+    print("=" * 80 + "\n")
 
 
 class DaemonRunner:
@@ -539,6 +772,35 @@ def parse_args() -> argparse.Namespace:
         help="Skip immediate intro rotation upon daemon startup",
     )
 
+    # test-pattern command
+    pattern_parser = subparsers.add_parser(
+        "test-pattern",
+        help="Generate an aspect ratio calibration card (with circles and grid) and set it as intro.mp4",
+    )
+    pattern_parser.add_argument(
+        "--aspect",
+        choices=["16:9", "4:3"],
+        default="16:9",
+        help="Target canvas aspect ratio to test (default: 16:9)",
+    )
+
+    # test-clip command
+    clip_test_parser = subparsers.add_parser(
+        "test-clip",
+        help="Render a video clip using a specific scaling mode (blur, zoom, native, stretch) and set it as intro.mp4",
+    )
+    clip_test_parser.add_argument(
+        "--mode",
+        choices=["blur", "zoom", "native", "stretch"],
+        default="blur",
+        help="Scaling mode: 'blur' (ambient fill), 'zoom' (fill 16:9), 'native' (raw 4:3), 'stretch' (forced wide)",
+    )
+    clip_test_parser.add_argument(
+        "--clip",
+        default=None,
+        help="Path or name of specific clip to test (defaults to first video)",
+    )
+
     return parser.parse_args()
 
 
@@ -559,6 +821,10 @@ def main() -> None:
         run_status(args, config)
     elif args.command in ["compare", "check-resolutions"]:
         run_compare(args, config)
+    elif args.command == "test-pattern":
+        run_test_pattern(args, config)
+    elif args.command == "test-clip":
+        run_test_clip(args, config)
     elif args.command == "daemon":
         run_daemon(args, config)
     else:
