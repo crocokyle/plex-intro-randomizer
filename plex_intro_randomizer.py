@@ -250,6 +250,8 @@ def generate_calibration_video(output_path: Path, aspect: str = "16:9", duration
     cmd = [
         "ffmpeg", "-y", "-loop", "1", "-i", str(tmp_img_path),
         "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+        "-vf", "setsar=1",
+        "-aspect", aspect,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
         "-t", str(duration_secs),
         "-pix_fmt", "yuv420p",
