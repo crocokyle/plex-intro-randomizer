@@ -369,8 +369,8 @@ def run_test_clip(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         mode_desc = "16:9 Crop & Zoom (fills 100% of widescreen with zero bars and zero blur)"
         cmd = [dl.ffmpeg_path, "-y", "-i", str(clip_source), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
     elif mode == "native":
-        vf = "scale=trunc(iw*sar/2)*2:trunc(ih/2)*2,setsar=1"
-        mode_desc = "Pure Native Resolution (no 16:9 canvas padding, no blur)"
+        vf = "scale='min(1920,trunc(iw*sar/2)*2)':'min(1080,trunc(ih/2)*2)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"
+        mode_desc = "Native Resolution (downscaled to max 1080p if higher, no 16:9 canvas padding, no blur)"
         cmd = [dl.ffmpeg_path, "-y", "-i", str(clip_source), "-vf", vf, "-map", "0:v", "-map", "0:a?"]
     elif mode == "stretch":
         vf = "scale=1920:1080,setsar=1"

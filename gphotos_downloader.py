@@ -352,7 +352,9 @@ class GPhotosAlbumDownloader:
 
             # Determine status
             if rem_w and rem_h and loc_w and loc_h:
-                if (loc_w, loc_h) == (1920, 1080):
+                if (rem_w > 1920 or rem_h > 1080) and (loc_w <= 1920 and loc_h <= 1080):
+                    status = f"OK (Downscaled {rem_w}x{rem_h}->{loc_w}x{loc_h})"
+                elif (loc_w, loc_h) == (1920, 1080):
                     status = "OK (1920x1080 16:9 Ambient Fill)"
                 elif (rem_w, rem_h) == (loc_w, loc_h):
                     status = "EXACT MATCH"
@@ -394,6 +396,57 @@ class GPhotosAlbumDownloader:
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
             return "audio" in res.stdout.lower()
         except Exception:
+            return False
+
+    @staticmethod
+    def is_larger_than_1080p(width: Optional[int], height: Optional[int]) -> bool:
+        """Check if video resolution exceeds standard 1080p (width > 1920 or height > 1080)."""
+        if not width or not height or width <= 0 or height <= 0:
+            return False
+        return width > 1920 or height > 1080
+
+    def downscale_video_to_1080p(self, input_path: Path, output_path: Path) -> bool:
+        """
+        Downscale video whose resolution exceeds 1080p so that its effective dimensions
+        do not exceed 1920x1080 (maintaining exact aspect ratio and square pixels).
+        """
+        temp_output_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        temp_output = Path(temp_output_file.name)
+        temp_output_file.close()
+
+        vf = "scale='min(1920,trunc(iw*sar/2)*2)':'min(1080,trunc(ih/2)*2)':force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"
+        has_audio = self.has_audio_stream(input_path)
+
+        cmd = [self.ffmpeg_path, "-y", "-nostdin", "-i", str(input_path)]
+        if not has_audio:
+            cmd += ["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"]
+
+        cmd += ["-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "22", "-pix_fmt", "yuv420p"]
+        if has_audio:
+            cmd += ["-map", "0:v", "-map", "0:a:0", "-c:a", "aac", "-b:a", "192k"]
+        else:
+            cmd += ["-map", "0:v", "-map", "1:a:0", "-c:a", "aac", "-b:a", "192k", "-shortest"]
+
+        cmd += ["-movflags", "+faststart", str(temp_output)]
+        try:
+            res = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            if res.returncode != 0:
+                err_msg = res.stderr.decode("utf-8", errors="ignore")
+                logger.error("FFmpeg downscaling failed for %s: %s", input_path.name, err_msg[-1000:])
+                if temp_output.exists():
+                    temp_output.unlink(missing_ok=True)
+                return False
+
+            shutil.move(str(temp_output), str(output_path))
+            return True
+        except (KeyboardInterrupt, SystemExit):
+            if temp_output.exists():
+                temp_output.unlink(missing_ok=True)
+            raise
+        except Exception as e:
+            logger.error("Error downscaling video %s: %s", input_path.name, e)
+            if temp_output.exists():
+                temp_output.unlink(missing_ok=True)
             return False
 
     def transcode_video_to_mp4(self, input_path: Path, output_path: Path) -> bool:
@@ -564,10 +617,12 @@ class GPhotosAlbumDownloader:
                 continue
 
             w, h = self.get_video_dimensions(p)
-            needs_normalization = force or (p.suffix.lower() != ".mp4") or (w != 1920 or h != 1080)
+            is_higher_than_1080p = self.is_larger_than_1080p(w, h)
+            needs_normalization = force or (p.suffix.lower() != ".mp4") or (w != 1920 or h != 1080) or is_higher_than_1080p
 
             if needs_normalization:
-                logger.info("Processing: %s (%sx%s)...", p.name, w or '?', h or '?')
+                action_desc = "Downscaling & normalizing" if is_higher_than_1080p else "Processing"
+                logger.info("%s: %s (%sx%s)...", action_desc, p.name, w or '?', h or '?')
                 backup_temp = p.with_suffix(".orig_fix" + p.suffix)
                 p.rename(backup_temp)
                 target_mp4 = p.with_suffix(".mp4")
@@ -680,6 +735,13 @@ class GPhotosAlbumDownloader:
                     elif intro_target_path.exists() and current_intro_orig == target_filename:
                         file_present = True
                 if file_present:
+                    check_target = (self.output_dir / target_filename) if (self.output_dir / target_filename).exists() else intro_target_path
+                    cur_w, cur_h = self.get_video_dimensions(check_target)
+                    if cur_w and cur_h and self.is_larger_than_1080p(cur_w, cur_h):
+                        logger.info("[%d/%d] Existing file %s is %sx%s (> 1080p). Re-downloading & downscaling to 1080p...", idx, len(base_urls), check_target.name, cur_w, cur_h)
+                        file_present = False
+
+                if file_present:
                     with count_lock:
                         downloaded_count[0] += 1
                         if limit and limit > 0 and downloaded_count[0] >= limit:
@@ -749,26 +811,36 @@ class GPhotosAlbumDownloader:
 
                 # Check if transcoding/normalization is needed
                 w, h = self.get_video_dimensions(temp_download_path)
+                is_higher_than_1080p = self.is_larger_than_1080p(w, h)
                 needs_transcode = (
                     force
                     or not is_already_mp4
                     or (w != 1920 or h != 1080)
                     or self.visual_filter is not None
                     or self.normalize_audio
+                    or is_higher_than_1080p
                 )
 
-                if self.transcode_to_mp4 and needs_transcode:
-                    logger.info("Transcoding/normalizing [%d/%d] %s (%s, %sx%s)...", idx, len(base_urls), orig_filename, content_type, w or '?', h or '?')
+                if is_higher_than_1080p:
+                    logger.info("Source video [%d/%d] %s is %sx%s (> 1080p). Downscaling to 1080p.", idx, len(base_urls), orig_filename, w or '?', h or '?')
+
+                if (self.transcode_to_mp4 and needs_transcode) or is_higher_than_1080p:
                     temp_transcode_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                     temp_transcode_path = Path(temp_transcode_file.name)
                     temp_transcode_file.close()
 
-                    success = self.transcode_video_to_mp4(temp_download_path, temp_transcode_path)
+                    if self.transcode_to_mp4:
+                        logger.info("Transcoding/normalizing [%d/%d] %s (%s, %sx%s)...", idx, len(base_urls), orig_filename, content_type, w or '?', h or '?')
+                        success = self.transcode_video_to_mp4(temp_download_path, temp_transcode_path)
+                    else:
+                        logger.info("Downscaling [%d/%d] %s from %sx%s to max 1080p...", idx, len(base_urls), orig_filename, w or '?', h or '?')
+                        success = self.downscale_video_to_1080p(temp_download_path, temp_transcode_path)
+
                     temp_download_path.unlink(missing_ok=True)
                     if not success:
                         if temp_transcode_path.exists():
                             temp_transcode_path.unlink(missing_ok=True)
-                        logger.error("Failed to transcode %s; skipping.", orig_filename)
+                        logger.error("Failed to transcode/downscale %s; skipping.", orig_filename)
                         return None
                     source_for_dest = temp_transcode_path
                 else:

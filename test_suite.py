@@ -363,6 +363,59 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
         })
         downloader.compare_resolutions(limit=1)
 
+    def test_is_larger_than_1080p(self):
+        """Verify is_larger_than_1080p accurately identifies resolutions exceeding 1080p."""
+        self.assertTrue(GPhotosAlbumDownloader.is_larger_than_1080p(3840, 2160))  # 4K UHD
+        self.assertTrue(GPhotosAlbumDownloader.is_larger_than_1080p(2560, 1440))  # 1440p
+        self.assertTrue(GPhotosAlbumDownloader.is_larger_than_1080p(2880, 2160))  # 4:3 4K
+        self.assertTrue(GPhotosAlbumDownloader.is_larger_than_1080p(1080, 1920))  # Vertical > 1080h
+        self.assertTrue(GPhotosAlbumDownloader.is_larger_than_1080p(2048, 1080))  # 2K > 1920w
+
+        self.assertFalse(GPhotosAlbumDownloader.is_larger_than_1080p(1920, 1080)) # Exact 1080p
+        self.assertFalse(GPhotosAlbumDownloader.is_larger_than_1080p(1440, 1080)) # 4:3 1080p
+        self.assertFalse(GPhotosAlbumDownloader.is_larger_than_1080p(1280, 720))  # 720p
+        self.assertFalse(GPhotosAlbumDownloader.is_larger_than_1080p(640, 480))   # 480p
+
+    def test_downscale_higher_than_1080p(self):
+        """Verify that videos higher resolution than 1080p are downscaled so neither dimension exceeds 1080p."""
+        sample_qhd = Path(self.test_dir) / "source_qhd.mp4"
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=c=red:s=2560x1440:d=1",
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+            "-t", "1",
+            str(sample_qhd),
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(res.returncode, 0)
+
+        downloader = GPhotosAlbumDownloader(
+            album_url=self.album_url,
+            output_dir=self.test_dir,
+            transcode_to_mp4=True,
+            normalize_audio=False,
+            visual_filter="none",
+        )
+
+        # 1. Test transcode_video_to_mp4 downscales 2560x1440 to 1920x1080
+        out_transcoded = Path(self.test_dir) / "out_transcoded_1080p.mp4"
+        success = downloader.transcode_video_to_mp4(sample_qhd, out_transcoded)
+        self.assertTrue(success)
+        details = downloader.probe_video_details(out_transcoded)
+        self.assertLessEqual(details["width"], 1920)
+        self.assertLessEqual(details["height"], 1080)
+        self.assertEqual(details["width"], 1920)
+        self.assertEqual(details["height"], 1080)
+
+        # 2. Test downscale_video_to_1080p preserves exact 16:9 ratio while scaling down
+        out_downscale = Path(self.test_dir) / "out_downscaled_1080p.mp4"
+        success2 = downloader.downscale_video_to_1080p(sample_qhd, out_downscale)
+        self.assertTrue(success2)
+        details2 = downloader.probe_video_details(out_downscale)
+        self.assertLessEqual(details2["width"], 1920)
+        self.assertLessEqual(details2["height"], 1080)
+
+
 
 class TestIntroRotator(unittest.TestCase):
     def setUp(self):
