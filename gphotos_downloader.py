@@ -578,12 +578,19 @@ class GPhotosAlbumDownloader:
             logger.info("Successfully processed %d existing videos.", fixed_count)
         return fixed_count
 
-    def sync_album(self, dry_run: bool = False, force: bool = False, clean: bool = False) -> List[Path]:
+    def sync_album(
+        self,
+        dry_run: bool = False,
+        force: bool = False,
+        clean: bool = False,
+        limit: Optional[int] = None,
+    ) -> List[Path]:
         """
         Run one-way sync. Downloads video clips from Google Photos, transcodes if necessary,
         and records downloaded items in the manifest.
         If force=True, re-downloads all clips and replaces existing files in the directory.
         If clean=True, removes existing video files in output_dir prior to downloading.
+        If limit is specified, stops after downloading/processing the specified number of videos.
         Returns list of newly downloaded/transcoded video paths.
         """
         html, _ = self.fetch_album_page()
@@ -591,6 +598,9 @@ class GPhotosAlbumDownloader:
         if not base_urls:
             logger.warning("No media items found in Google Photos album.")
             return []
+
+        if limit and limit > 0:
+            logger.info("Limit specified: downloading up to %d videos from album.", limit)
 
         if clean and not dry_run:
             logger.info("Clean option enabled. Removing existing video files in %s...", self.output_dir)
@@ -627,8 +637,13 @@ class GPhotosAlbumDownloader:
                 pass
 
         new_files: List[Path] = []
+        downloaded_count = 0
 
         for idx, base_url in enumerate(base_urls, start=1):
+            if limit and limit > 0 and downloaded_count >= limit:
+                logger.info("Reached download limit of %d videos. Stopping sync.", limit)
+                break
+
             media_id = base_url.split("/pw/")[-1]
             if not force and media_id in self.manifest:
                 existing_record = self.manifest[media_id]
@@ -640,6 +655,7 @@ class GPhotosAlbumDownloader:
                     elif intro_target_path.exists() and current_intro_orig == target_filename:
                         file_present = True
                 if file_present:
+                    downloaded_count += 1
                     logger.debug("[%d/%d] Item %s already downloaded as %s. Skipping.", idx, len(base_urls), media_id[:12], target_filename)
                     continue
 
@@ -745,7 +761,11 @@ class GPhotosAlbumDownloader:
                 }
                 self._save_manifest()
                 new_files.append(dest_path)
-                logger.info("Saved: %s (%d bytes)", dest_path.name, dest_path.stat().st_size)
+                downloaded_count += 1
+                logger.info("Saved: %s (%d bytes) [%d/%s]", dest_path.name, dest_path.stat().st_size, downloaded_count, limit if limit else len(base_urls))
+                if limit and limit > 0 and downloaded_count >= limit:
+                    logger.info("Reached download limit of %d videos. Stopping sync.", limit)
+                    break
 
             except (KeyboardInterrupt, SystemExit):
                 if temp_download_path.exists():

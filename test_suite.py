@@ -220,6 +220,57 @@ class TestGPhotosAlbumDownloader(unittest.TestCase):
             self.assertFalse(stray_file.exists(), "Clean should have wiped stray_old_video.mp4")
             self.assertTrue(intro_path.exists(), "intro.mp4 should have been re-downloaded and activated fresh")
 
+    def test_sync_with_limit(self):
+        """Verify that sync_album respects the limit parameter (e.g. limit=2 stops after 2 videos)."""
+        import io
+        from unittest.mock import patch, MagicMock
+
+        output_sync_dir = Path(self.test_dir) / "intros_limit_test"
+        output_sync_dir.mkdir(parents=True, exist_ok=True)
+
+        sample_mp4 = Path(self.test_dir) / "source_mock.mp4"
+        if not sample_mp4.exists():
+            cmd = [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", "color=c=black:s=640x360:d=1",
+                "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
+                "-t", "1",
+                str(sample_mp4),
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        sample_bytes = sample_mp4.read_bytes()
+
+        downloader = GPhotosAlbumDownloader(
+            album_url=self.album_url,
+            output_dir=output_sync_dir,
+            transcode_to_mp4=False,
+        )
+
+        downloader.fetch_album_page = MagicMock(return_value=("<html>mock</html>", None))
+        # Offer 5 media items
+        downloader.extract_media_urls = MagicMock(return_value=[
+            f"https://lh3.googleusercontent.com/pw/ITEM_{i}" for i in range(1, 6)
+        ])
+        downloader.get_media_info = MagicMock(side_effect=lambda u: {
+            "download_url": f"{u}=dv",
+            "filename": f"clip_{u.split('_')[-1]}.mp4",
+            "content_type": "video/mp4",
+        })
+
+        class MockResponse:
+            def __init__(self, data):
+                self._io = io.BytesIO(data)
+            def read(self, size=65536):
+                return self._io.read(size)
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        with patch("urllib.request.urlopen", return_value=MockResponse(sample_bytes)):
+            synced = downloader.sync_album(dry_run=False, force=True, clean=True, limit=2)
+            self.assertEqual(len(synced), 2, "Should have downloaded exactly 2 items due to limit=2")
+
     def test_probe_and_compare_resolutions(self):
         """Verify probe_video_details accurately reads video metadata and compare_resolutions runs without error."""
         sample_mp4 = Path(self.test_dir) / "probe_target.mp4"

@@ -130,6 +130,20 @@ If you also want to remove previous videos in the directory first (e.g. to clear
 python3 plex_intro_randomizer.py -c config.json redownload --clean
 ```
 
+### Fast Testing: Download Only the First 5 Clips (`first-five`)
+For rapid testing and troubleshooting without waiting for the entire album to download:
+```bash
+python3 plex_intro_randomizer.py -c config.json first-five
+```
+*(Wipes the directory by default, downloads and transcodes only the first 5 clips with complete diagnostic telemetry, and immediately activates the first as `intro.mp4`).*
+
+You can also specify custom limits on `first-five`, `redownload`, or `sync`:
+```bash
+python3 plex_intro_randomizer.py -c config.json first-five -n 3
+# or
+python3 plex_intro_randomizer.py -c config.json redownload --clean --first 5
+```
+
 ### Process Existing Videos (Apply Filters & Normalize Audio)
 Scan your video directory to re-encode non-MP4 files or re-apply visual filters and audio loudness normalization to all existing videos:
 ```bash

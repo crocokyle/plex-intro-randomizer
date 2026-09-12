@@ -75,8 +75,14 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     normalize_audio = config.get("normalize_audio", True) if args.normalize_audio is None else args.normalize_audio
     visual_filter = config.get("visual_filter", False)
 
-    force = getattr(args, "force", False) or args.command in ["redownload", "force-download"]
+    force = getattr(args, "force", False) or args.command in ["redownload", "force-download", "first-five", "first-5"]
     clean = getattr(args, "clean", False)
+    limit = getattr(args, "count", None) or getattr(args, "limit", None) or getattr(args, "first", None)
+    if args.command in ["first-five", "first-5"]:
+        if limit is None:
+            limit = 5
+        force = True
+
     target_intro = config.get("target_intro_name", DEFAULT_TARGET_INTRO)
 
     logger.info("Starting Google Photos album sync...")
@@ -88,6 +94,8 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
     logger.info("Force Re-download / Replace All: %s", force)
     if clean:
         logger.info("Clean Directory Before Download: True")
+    if limit:
+        logger.info("Limit Download Count: %d videos", limit)
 
     rotator = IntroRotator(video_dir=video_dir, target_intro_name=target_intro)
     if force or clean:
@@ -103,7 +111,7 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         visual_filter=visual_filter,
         target_intro_name=target_intro,
     )
-    new_files = downloader.sync_album(dry_run=args.dry_run, force=force, clean=clean)
+    new_files = downloader.sync_album(dry_run=args.dry_run, force=force, clean=clean, limit=limit)
     logger.info("Sync finished. %d items downloaded / updated.", len(new_files))
 
     if (force or clean) and not args.dry_run:
@@ -389,6 +397,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Wipe existing videos in the directory first before downloading fresh from album",
     )
+    sync_parser.add_argument(
+        "-n", "--limit", "--first",
+        dest="limit",
+        type=int,
+        default=None,
+        help="Limit number of videos to download/process (e.g. --first 5)",
+    )
 
     # redownload / force-download command
     redownload_parser = subparsers.add_parser(
@@ -400,6 +415,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Wipe existing videos in the directory first before downloading fresh from album",
     )
+    redownload_parser.add_argument(
+        "-n", "--limit", "--first",
+        dest="limit",
+        type=int,
+        default=None,
+        help="Limit number of videos to download/process (e.g. --first 5)",
+    )
 
     force_dl_parser = subparsers.add_parser(
         "force-download",
@@ -409,6 +431,62 @@ def parse_args() -> argparse.Namespace:
         "--clean",
         action="store_true",
         help="Wipe existing videos in the directory first before downloading fresh from album",
+    )
+    force_dl_parser.add_argument(
+        "-n", "--limit", "--first",
+        dest="limit",
+        type=int,
+        default=None,
+        help="Limit number of videos to download/process (e.g. --first 5)",
+    )
+
+    # first-five / first-5 command for fast testing
+    first_five_parser = subparsers.add_parser(
+        "first-five",
+        help="Download and process only the first 5 videos from the album for fast testing",
+    )
+    first_five_parser.add_argument(
+        "--clean",
+        action="store_true",
+        default=True,
+        help="Wipe existing videos in the directory first before downloading (default: True)",
+    )
+    first_five_parser.add_argument(
+        "--no-clean",
+        action="store_false",
+        dest="clean",
+        help="Do not wipe existing videos before downloading",
+    )
+    first_five_parser.add_argument(
+        "-n", "--count", "--first", "--limit",
+        dest="limit",
+        type=int,
+        default=5,
+        help="Number of videos to download (default: 5)",
+    )
+
+    first_5_parser = subparsers.add_parser(
+        "first-5",
+        help="Alias for 'first-five'",
+    )
+    first_5_parser.add_argument(
+        "--clean",
+        action="store_true",
+        default=True,
+        help="Wipe existing videos in the directory first before downloading (default: True)",
+    )
+    first_5_parser.add_argument(
+        "--no-clean",
+        action="store_false",
+        dest="clean",
+        help="Do not wipe existing videos before downloading",
+    )
+    first_5_parser.add_argument(
+        "-n", "--count", "--first", "--limit",
+        dest="limit",
+        type=int,
+        default=5,
+        help="Number of videos to download (default: 5)",
     )
 
     # normalize command
@@ -469,7 +547,7 @@ def main() -> None:
 
     config = load_config(args.config)
 
-    if args.command in ["sync", "redownload", "force-download"]:
+    if args.command in ["sync", "redownload", "force-download", "first-five", "first-5"]:
         run_sync(args, config)
     elif args.command == "normalize":
         run_normalize(args, config)
