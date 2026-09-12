@@ -82,6 +82,8 @@ def run_sync(args: argparse.Namespace, config: Dict[str, Any]) -> None:
         if limit is None:
             limit = 5
         force = True
+        if getattr(args, "clean", None) is not False:
+            clean = True
 
     target_intro = config.get("target_intro_name", DEFAULT_TARGET_INTRO)
 
